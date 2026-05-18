@@ -1,0 +1,85 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
+from app.database import get_db
+from app.models import ParticipantSession, ParticipantToken, RawEvent, TokenStatus
+from app.schemas import AdminTokenSummaryResponse, TokenCreateRequest, TokenCreateResponse, TokenResponse, TokenValidateRequest, TokenValidateResponse
+from app.services.token_service import create_participant_token, get_or_create_session, validate_and_touch_token
+
+router = APIRouter(prefix="/api", tags=["tokens"])
+
+
+@router.post("/admin/tokens", response_model=TokenCreateResponse)
+def create_token(payload: TokenCreateRequest, db: Session = Depends(get_db)) -> TokenCreateResponse:
+    participant, raw_token = create_participant_token(db, label=payload.label, expires_at=payload.expires_at)
+    invite_url = f"{get_settings().public_web_url.rstrip('/')}/play/{raw_token}"
+    return TokenCreateResponse(token=raw_token, invite_url=invite_url, participant=participant)
+
+
+@router.get("/admin/tokens", response_model=list[TokenResponse])
+def list_tokens(db: Session = Depends(get_db)) -> list[ParticipantToken]:
+    return db.query(ParticipantToken).order_by(ParticipantToken.created_at.desc()).all()
+
+
+@router.get("/admin/tokens/summary", response_model=list[AdminTokenSummaryResponse])
+def list_token_summaries(db: Session = Depends(get_db)) -> list[AdminTokenSummaryResponse]:
+    participants = db.query(ParticipantToken).order_by(ParticipantToken.created_at.desc()).all()
+    summaries: list[AdminTokenSummaryResponse] = []
+    for participant in participants:
+        session = (
+            db.query(ParticipantSession)
+            .filter(ParticipantSession.token_id == participant.id)
+            .order_by(ParticipantSession.created_at.desc())
+            .first()
+        )
+        event_count = db.query(RawEvent).filter(RawEvent.token_id == participant.id).count()
+        summaries.append(
+            AdminTokenSummaryResponse.model_validate(participant).model_copy(
+                update={
+                    "current_step": session.current_step if session else None,
+                    "session_status": session.status if session else None,
+                    "event_count": event_count,
+                }
+            )
+        )
+    return summaries
+
+
+@router.post("/admin/tokens/{token_id}/revoke", response_model=TokenResponse)
+def revoke_token(token_id: str, db: Session = Depends(get_db)) -> ParticipantToken:
+    participant = db.get(ParticipantToken, token_id)
+    if participant is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+    participant.status = TokenStatus.revoked
+    db.commit()
+    db.refresh(participant)
+    return participant
+
+
+@router.post("/admin/tokens/{token_id}/reset", response_model=TokenResponse)
+def reset_token(token_id: str, db: Session = Depends(get_db)) -> ParticipantToken:
+    participant = db.get(ParticipantToken, token_id)
+    if participant is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+    participant.status = TokenStatus.reset
+    participant.completed_at = None
+    db.commit()
+    db.refresh(participant)
+    return participant
+
+
+@router.post("/tokens/validate", response_model=TokenValidateResponse)
+def validate_token(payload: TokenValidateRequest, db: Session = Depends(get_db)) -> TokenValidateResponse:
+    participant, message = validate_and_touch_token(db, payload.token)
+    if participant is None or participant.status in {TokenStatus.revoked, TokenStatus.expired}:
+        return TokenValidateResponse(valid=False, status=participant.status if participant else None, message=message)
+
+    session = get_or_create_session(db, participant)
+    return TokenValidateResponse(
+        valid=True,
+        participant_id=participant.id,
+        status=participant.status,
+        session_id=session.id,
+        message=message,
+    )

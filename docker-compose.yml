@@ -1,0 +1,43 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-digital_twin}
+      POSTGRES_USER: ${POSTGRES_USER:-digital_twin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-digital_twin_dev_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-digital_twin} -d ${POSTGRES_DB:-digital_twin}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./apps/api
+    environment:
+      DATABASE_URL: postgresql+psycopg://digital_twin:digital_twin_dev_password@db:5432/digital_twin
+      APP_SECRET_KEY: change-me-in-production
+      CORS_ORIGINS: http://localhost:3000
+      PUBLIC_WEB_URL: http://localhost:3000
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./apps/web
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
