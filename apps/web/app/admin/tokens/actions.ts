@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 
-import { API_BASE_URL } from "@/lib/api";
+import { API_SERVER_BASE_URL } from "@/lib/api-server";
 
 export type CreateTokenState = {
     inviteUrl?: string;
@@ -18,7 +18,7 @@ export async function createTokenAction(_prevState: CreateTokenState, formData: 
     }
 
     try {
-        const response = await fetch(`${API_BASE_URL}/api/admin/tokens`, {
+        const response = await fetch(`${API_SERVER_BASE_URL}/api/admin/tokens`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ label }),
@@ -41,7 +41,7 @@ export async function revokeTokenAction(formData: FormData) {
     const tokenId = String(formData.get("tokenId") ?? "");
     if (!tokenId) return;
 
-    await fetch(`${API_BASE_URL}/api/admin/tokens/${tokenId}/revoke`, {
+    await fetch(`${API_SERVER_BASE_URL}/api/admin/tokens/${tokenId}/revoke`, {
         method: "POST",
         cache: "no-store",
     });
@@ -52,9 +52,22 @@ export async function resetTokenAction(formData: FormData) {
     const tokenId = String(formData.get("tokenId") ?? "");
     if (!tokenId) return;
 
-    await fetch(`${API_BASE_URL}/api/admin/tokens/${tokenId}/reset`, {
+    await fetch(`${API_SERVER_BASE_URL}/api/admin/tokens/${tokenId}/reset`, {
         method: "POST",
         cache: "no-store",
     });
     revalidatePath("/admin/tokens");
+}
+
+export async function analyzeTokenAction(formData: FormData) {
+    const tokenId = String(formData.get("tokenId") ?? "");
+    if (!tokenId) return;
+
+    await fetch(`${API_SERVER_BASE_URL}/api/admin/tokens/${tokenId}/analyze`, {
+        method: "POST",
+        cache: "no-store",
+    });
+    revalidatePath("/admin");
+    revalidatePath("/admin/tokens");
+    revalidatePath(`/admin/tokens/${tokenId}`);
 }

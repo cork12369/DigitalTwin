@@ -23,6 +23,13 @@ export function CreateTokenForm() {
             {state.inviteUrl && (
                 <div className="panel stack compact-panel">
                     <strong>Invite link generated</strong>
+                    {state.token && (
+                        <>
+                            <span className="muted">Auth token</span>
+                            <code>{state.token}</code>
+                        </>
+                    )}
+                    <span className="muted">Direct questionnaire link</span>
                     <code>{state.inviteUrl}</code>
                     <button className="button secondary" type="button" onClick={() => navigator.clipboard.writeText(state.inviteUrl ?? "")}>
                         Copy Invite Link

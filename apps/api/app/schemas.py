@@ -59,6 +59,10 @@ class EventResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AdminActivityResponse(EventResponse):
+    token_label: str | None = None
+
+
 class SessionResponse(BaseModel):
     id: str
     token_id: str
@@ -79,6 +83,8 @@ class WorkflowRunResponse(BaseModel):
     output_summary: str | None
     error_summary: str | None
     metadata_json: dict
+    started_at: datetime | None
+    completed_at: datetime | None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -103,6 +109,8 @@ class ScenarioStep(BaseModel):
     title: str
     prompt: str
     options: list[str] | None = None
+    context_title: str | None = None
+    context_items: list[str] | None = None
 
 
 class SessionStartRequest(BaseModel):
@@ -143,6 +151,8 @@ class AdminTokenSummaryResponse(TokenResponse):
     current_step: str | None = None
     session_status: SessionStatus | None = None
     event_count: int = 0
+    latest_analysis_status: AnalysisStatus | None = None
+    evidence_count: int = 0
 
 
 class AnalysisArtifactResponse(BaseModel):
@@ -195,3 +205,11 @@ class AnalysisRunResponse(BaseModel):
 class AnalysisRunDetailResponse(AnalysisRunResponse):
     artifacts: list[AnalysisArtifactResponse] = []
     evidence: list[BehavioralEvidenceResponse] = []
+
+
+class AdminTokenDetailResponse(BaseModel):
+    participant: AdminTokenSummaryResponse
+    sessions: list[SessionResponse]
+    events: list[EventResponse]
+    analysis_runs: list[AnalysisRunResponse]
+    evidence: list[BehavioralEvidenceResponse]

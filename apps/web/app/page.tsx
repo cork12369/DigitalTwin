@@ -11,6 +11,7 @@ export default function HomePage() {
                     and an OpenClaw-inspired command center.
                 </p>
                 <div className="row" style={{ justifyContent: "flex-start" }}>
+                    <Link className="button" href="/start">Initialize Twin</Link>
                     <Link className="button" href="/admin">Open Command Center</Link>
                     <Link className="button secondary" href="/admin/tokens">Manage Tokens</Link>
                 </div>

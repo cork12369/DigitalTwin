@@ -5,7 +5,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import AnalysisArtifact, AnalysisRun, AnalysisStatus, BehavioralEvidence, EvidenceType, ParticipantToken, RawEvent
+from app.config import get_settings
+from app.models import AnalysisArtifact, AnalysisRun, AnalysisStatus, BehavioralEvidence, ErrorCategory, ErrorReport, EvidenceType, ParticipantToken, RawEvent
 from app.scenario import STEP_BY_ID
 
 
@@ -175,6 +176,7 @@ def _extract_event(db: Session, run: AnalysisRun, event: RawEvent) -> None:
 
 
 def analyze_token(db: Session, participant: ParticipantToken) -> AnalysisRun:
+    settings = get_settings()
     session = participant.sessions[-1] if participant.sessions else None
     events = db.query(RawEvent).filter(RawEvent.token_id == participant.id).order_by(RawEvent.created_at.asc()).all()
     run = AnalysisRun(
@@ -182,7 +184,7 @@ def analyze_token(db: Session, participant: ParticipantToken) -> AnalysisRun:
         session_id=session.id if session else None,
         status=AnalysisStatus.running,
         prompt_version=PROMPT_VERSION,
-        model_name=MODEL_NAME,
+        model_name=settings.openrouter_model if settings.has_openrouter_key else MODEL_NAME,
         input_summary=f"Analyzing {len(events)} raw events with reliability-first multi-pass mock extractor.",
         started_at=datetime.now(timezone.utc),
     )
@@ -207,6 +209,23 @@ def analyze_token(db: Session, participant: ParticipantToken) -> AnalysisRun:
             },
             0.65,
         )
+        _create_artifact(
+            db,
+            run,
+            "value_graph_update_proposal",
+            [event.id for event in events],
+            {
+                "analysis_mode": "mock_value_graph_proposal",
+                "status": "proposal_only",
+                "note": "Use accepted behavioral evidence to propose value nodes, opposing edges, reinforcing edges, and conditional policy edges in the next graph phase.",
+                "evidence_count": evidence_count,
+                "requires_llm_review": any(
+                    event.payload.get("step_type") in {"context_flip", "correction"}
+                    for event in events
+                ),
+            },
+            0.62,
+        )
         run.status = AnalysisStatus.completed
         run.output_summary = f"Created {evidence_count} behavioral evidence records. Open-ended answers flagged for LLM review."
         run.completed_at = datetime.now(timezone.utc)
@@ -217,5 +236,14 @@ def analyze_token(db: Session, participant: ParticipantToken) -> AnalysisRun:
         run.status = AnalysisStatus.failed
         run.error_summary = str(exc)
         run.completed_at = datetime.now(timezone.utc)
+        db.add(
+            ErrorReport(
+                token_id=participant.id,
+                category=ErrorCategory.workflow,
+                severity="error",
+                summary="Behavioral analysis failed.",
+                raw_detail=str(exc),
+            )
+        )
         db.commit()
         raise

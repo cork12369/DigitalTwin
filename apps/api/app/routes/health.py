@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.database import get_db
 
 router = APIRouter(tags=["health"])
@@ -20,8 +21,13 @@ def database_health(db: Session = Depends(get_db)) -> dict:
 
 @router.get("/health/langchain")
 def langchain_health() -> dict:
+    settings = get_settings()
+    provider_status = "configured" if settings.has_openrouter_key else "not_configured"
     return {
-        "status": "placeholder",
-        "langchain": "not_configured_yet",
-        "message": "LangChain workflow layer will be enabled in a later phase.",
+        "status": "ok" if settings.has_openrouter_key else "placeholder",
+        "langchain": "mock_orchestration_ready",
+        "model_provider": "openrouter",
+        "provider_status": provider_status,
+        "model": settings.openrouter_model,
+        "message": "OpenRouter is configured for LLM-backed review." if settings.has_openrouter_key else "OpenRouter key is not configured; analysis will use the local mock extractor.",
     }

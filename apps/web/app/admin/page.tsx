@@ -1,15 +1,49 @@
 import Link from "next/link";
 
-const healthCards = [
-    "Backend API",
-    "LangChain workflow layer",
-    "PostgreSQL event store",
-    "Value graph store",
-    "Model provider",
-    "Frontend",
-];
+import { type AnalysisRun, type ErrorReport, type HealthResponse, type RawEvent } from "@/lib/api";
+import { API_SERVER_BASE_URL } from "@/lib/api-server";
 
-export default function AdminDashboardPage() {
+async function safeFetch<T>(path: string, fallback: T): Promise<T> {
+    try {
+        const response = await fetch(`${API_SERVER_BASE_URL}${path}`, { cache: "no-store" });
+        if (!response.ok) return fallback;
+        return response.json();
+    } catch {
+        return fallback;
+    }
+}
+
+function formatDate(value: string | null) {
+    if (!value) return "—";
+    return new Date(value).toLocaleString();
+}
+
+function statusTone(status?: string) {
+    if (!status) return "muted";
+    if (["ok", "completed", "configured"].includes(status)) return "status";
+    if (["failed", "error"].includes(status)) return "error";
+    return "status warning";
+}
+
+export default async function AdminDashboardPage() {
+    const [apiHealth, dbHealth, langchainHealth, activity, runs, errors] = await Promise.all([
+        safeFetch<HealthResponse>("/health", { status: "unreachable" }),
+        safeFetch<HealthResponse>("/health/db", { status: "unreachable" }),
+        safeFetch<HealthResponse>("/health/langchain", { status: "unreachable" }),
+        safeFetch<RawEvent[]>("/api/admin/activity?limit=8", []),
+        safeFetch<AnalysisRun[]>("/api/admin/analysis-runs?limit=8", []),
+        safeFetch<ErrorReport[]>("/api/admin/errors?limit=8", []),
+    ]);
+
+    const healthCards = [
+        { label: "Backend API", status: apiHealth.status, detail: String(apiHealth.service ?? "FastAPI service") },
+        { label: "PostgreSQL event store", status: dbHealth.status, detail: String(dbHealth.database ?? "Database health") },
+        { label: "LangChain workflow layer", status: langchainHealth.status, detail: String(langchainHealth.langchain ?? "Mock orchestration") },
+        { label: "Model provider", status: String(langchainHealth.provider_status ?? "unknown"), detail: String(langchainHealth.model ?? "OpenRouter") },
+        { label: "Raw activity feed", status: activity.length > 0 ? "ok" : "placeholder", detail: `${activity.length} recent events loaded` },
+        { label: "Error inbox", status: errors.length > 0 ? "error" : "ok", detail: `${errors.length} unresolved errors` },
+    ];
+
     return (
         <main className="page">
             <div className="container stack">
@@ -27,13 +61,13 @@ export default function AdminDashboardPage() {
                 </section>
 
                 <section className="grid">
-                    {healthCards.map((label) => (
-                        <article className="panel" key={label}>
-                            <div className="row">
-                                <h3>{label}</h3>
-                                <span className="status"><span className="dot" />Ready</span>
+                    {healthCards.map((card) => (
+                        <article className="panel command-card" key={card.label}>
+                            <div className="row card-header">
+                                <h3>{card.label}</h3>
+                                <span className={statusTone(card.status)}><span className="dot" />{card.status}</span>
                             </div>
-                            <p className="muted">Health endpoint wiring starts in Phase 1; live status polling comes next.</p>
+                            <p className="muted">{card.detail}</p>
                         </article>
                     ))}
                 </section>
@@ -41,15 +75,43 @@ export default function AdminDashboardPage() {
                 <section className="grid">
                     <article className="panel">
                         <h2>Live Activity Feed</h2>
-                        <p className="muted">Probe sessions, duels, corrections, and value-graph updates will stream here.</p>
+                        <div className="stack">
+                            {activity.length === 0 ? <p className="muted">No scenario activity captured yet.</p> : activity.map((event) => (
+                                <div className="compact-panel" key={event.id}>
+                                    <strong>{event.event_type}</strong>
+                                    <div className="muted">{event.token_label ?? event.token_id}</div>
+                                    <div className="muted">{formatDate(event.created_at)}</div>
+                                </div>
+                            ))}
+                        </div>
                     </article>
                     <article className="panel">
                         <h2>Error Inbox</h2>
-                        <p className="muted">Workflow, provider, validation, graph, memory, and infrastructure errors will appear here.</p>
+                        <div className="stack">
+                            {errors.length === 0 ? <p className="muted">No unresolved errors.</p> : errors.map((error) => (
+                                <div className="compact-panel" key={error.id}>
+                                    <strong className="error">{error.summary}</strong>
+                                    <div className="muted">{error.category} · {error.severity}</div>
+                                    <div className="muted">{formatDate(error.created_at)}</div>
+                                </div>
+                            ))}
+                        </div>
                     </article>
                     <article className="panel">
                         <h2>LangChain Runs</h2>
-                        <p className="muted">Run status, duration, retries, inputs, outputs, and failure reasons will be tracked here.</p>
+                        <div className="stack">
+                            {runs.length === 0 ? <p className="muted">No analysis runs yet.</p> : runs.map((run) => (
+                                <div className="compact-panel" key={run.id}>
+                                    <div className="row">
+                                        <strong>{run.analysis_type}</strong>
+                                        <span className={statusTone(run.status)}><span className="dot" />{run.status}</span>
+                                    </div>
+                                    <div className="muted">{run.model_name}</div>
+                                    <div className="muted">{formatDate(run.created_at)}</div>
+                                    {run.output_summary && <p className="muted">{run.output_summary}</p>}
+                                </div>
+                            ))}
+                        </div>
                     </article>
                 </section>
             </div>

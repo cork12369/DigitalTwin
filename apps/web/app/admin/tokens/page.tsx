@@ -1,22 +1,9 @@
 import Link from "next/link";
 
-import { API_BASE_URL } from "@/lib/api";
+import { type ParticipantToken } from "@/lib/api";
+import { API_SERVER_BASE_URL } from "@/lib/api-server";
 import { CreateTokenForm } from "./create-token-form";
 import { TokenActions } from "./token-actions";
-
-type ParticipantToken = {
-    id: string;
-    label: string;
-    status: string;
-    created_at: string;
-    expires_at: string | null;
-    first_used_at: string | null;
-    last_seen_at: string | null;
-    completed_at: string | null;
-    current_step: string | null;
-    session_status: string | null;
-    event_count: number;
-};
 
 function formatDate(value: string | null) {
     if (!value) return "—";
@@ -25,7 +12,7 @@ function formatDate(value: string | null) {
 
 async function getTokens(): Promise<ParticipantToken[]> {
     try {
-        const response = await fetch(`${API_BASE_URL}/api/admin/tokens/summary`, { cache: "no-store" });
+        const response = await fetch(`${API_SERVER_BASE_URL}/api/admin/tokens/summary`, { cache: "no-store" });
         if (!response.ok) return [];
         return response.json();
     } catch {
@@ -45,7 +32,10 @@ export default async function TokenAdminPage() {
                     <p>
                         Create personal invite tokens, monitor status, and keep scenario data mapped to each participant.
                     </p>
-                    <Link className="button secondary" href="/admin">Back to Dashboard</Link>
+                    <div className="row" style={{ justifyContent: "flex-start" }}>
+                        <Link className="button secondary" href="/admin">Back to Dashboard</Link>
+                        <Link className="button secondary" href="/start">Participant Start Page</Link>
+                    </div>
                 </section>
 
                 <section className="panel stack">
@@ -69,10 +59,13 @@ export default async function TokenAdminPage() {
                                         <div className="muted">Last seen: {formatDate(token.last_seen_at)}</div>
                                         <div className="muted">Session: {token.session_status ?? "not started"}</div>
                                         <div className="muted">Current step: {token.current_step ?? "—"}</div>
-                                        <div className="muted">Events captured: {token.event_count}</div>
+                                        <div className="muted">Events captured: {token.event_count ?? 0}</div>
+                                        <div className="muted">Evidence: {token.evidence_count ?? 0}</div>
+                                        <div className="muted">Latest analysis: {token.latest_analysis_status ?? "not run"}</div>
                                     </div>
                                     <span className="status"><span className="dot" />{token.status}</span>
                                 </div>
+                                <Link className="button secondary" href={`/admin/tokens/${token.id}`}>Open Evidence Browser</Link>
                                 <TokenActions tokenId={token.id} disabled={token.status === "revoked"} />
                             </div>
                         ))

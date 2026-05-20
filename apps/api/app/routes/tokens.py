@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
-from app.models import ParticipantSession, ParticipantToken, RawEvent, TokenStatus
+from app.models import AnalysisRun, BehavioralEvidence, ParticipantSession, ParticipantToken, RawEvent, TokenStatus
 from app.schemas import AdminTokenSummaryResponse, TokenCreateRequest, TokenCreateResponse, TokenResponse, TokenValidateRequest, TokenValidateResponse
 from app.services.token_service import create_participant_token, get_or_create_session, validate_and_touch_token
 
@@ -34,12 +34,21 @@ def list_token_summaries(db: Session = Depends(get_db)) -> list[AdminTokenSummar
             .first()
         )
         event_count = db.query(RawEvent).filter(RawEvent.token_id == participant.id).count()
+        latest_analysis = (
+            db.query(AnalysisRun)
+            .filter(AnalysisRun.token_id == participant.id)
+            .order_by(AnalysisRun.created_at.desc())
+            .first()
+        )
+        evidence_count = db.query(BehavioralEvidence).filter(BehavioralEvidence.token_id == participant.id).count()
         summaries.append(
             AdminTokenSummaryResponse.model_validate(participant).model_copy(
                 update={
                     "current_step": session.current_step if session else None,
                     "session_status": session.status if session else None,
                     "event_count": event_count,
+                    "latest_analysis_status": latest_analysis.status if latest_analysis else None,
+                    "evidence_count": evidence_count,
                 }
             )
         )

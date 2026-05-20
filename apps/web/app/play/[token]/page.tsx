@@ -1,4 +1,4 @@
-import { API_BASE_URL } from "@/lib/api";
+import { API_SERVER_BASE_URL } from "@/lib/api-server";
 import { ScenarioClient } from "./scenario-client";
 
 type PageProps = {
@@ -7,7 +7,7 @@ type PageProps = {
 
 async function validateToken(token: string) {
     try {
-        const response = await fetch(`${API_BASE_URL}/api/tokens/validate`, {
+        const response = await fetch(`${API_SERVER_BASE_URL}/api/tokens/validate`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ token }),
@@ -21,7 +21,7 @@ async function validateToken(token: string) {
 }
 
 async function startSession(token: string) {
-    const response = await fetch(`${API_BASE_URL}/api/sessions/start`, {
+    const response = await fetch(`${API_SERVER_BASE_URL}/api/sessions/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token }),

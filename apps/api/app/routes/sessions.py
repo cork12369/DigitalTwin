@@ -20,6 +20,74 @@ from app.services.token_service import find_by_raw_token, get_or_create_session,
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
+def _answer_text(answer: dict, key: str) -> str | None:
+    value = answer.get(key)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _sentence(value: str) -> str:
+    return value.strip().rstrip(".")
+
+
+def _preliminary_twin_read(events: list[RawEvent]) -> list[str]:
+    answers_by_step = {
+        event.payload.get("step_id"): event.payload.get("answer", {})
+        for event in events
+        if isinstance(event.payload, dict)
+    }
+
+    triad_1 = _answer_text(answers_by_step.get("triad_1", {}), "selected_option")
+    triad_2 = _answer_text(answers_by_step.get("triad_2", {}), "selected_option")
+    triad_3 = _answer_text(answers_by_step.get("triad_3", {}), "selected_option")
+    duel_1 = _answer_text(answers_by_step.get("duel_1", {}), "selected_option")
+    duel_2 = _answer_text(answers_by_step.get("duel_2", {}), "selected_option")
+    duel_3 = _answer_text(answers_by_step.get("duel_3", {}), "selected_option")
+    context_1 = _answer_text(answers_by_step.get("context_flip_1", {}), "text")
+    context_2 = _answer_text(answers_by_step.get("context_flip_2", {}), "text")
+    ranked = answers_by_step.get("twin_rank_1", {}).get("ranked_options", [])
+
+    read: list[str] = []
+    if triad_1 or triad_2 or triad_3:
+        read.append(
+            "Under pressure, the twin currently reads your first-pass priorities as: "
+            + ", ".join(option for option in [triad_1, triad_2, triad_3] if option)
+            + "."
+        )
+    if duel_1 or duel_2:
+        read.append(
+            "In trade-offs, it currently assumes you lean toward "
+            + " and ".join(option for option in [duel_1, duel_2] if option)
+            + "."
+        )
+    if duel_3:
+        read.append(f"For disagreement with the twin, it currently believes you prefer: {duel_3}.")
+    if context_1 or context_2:
+        read.append(
+            "Your context-flip answers suggest these choices may change by audience, reversibility, or public visibility."
+        )
+    if isinstance(ranked, list) and ranked:
+        read.append(f"The response it treats as closest to you is: {_sentence(str(ranked[0]))}.")
+
+    return read or ["The twin has not collected enough answers yet to form a useful preliminary read."]
+
+
+def _steps_for_session(events: list[RawEvent]) -> list[dict]:
+    twin_read = _preliminary_twin_read(events)
+    steps: list[dict] = []
+    for step in SCENARIO_STEPS:
+        if step["id"] == "correction_1":
+            steps.append(
+                {
+                    **step,
+                    "context_title": "Preliminary twin read",
+                    "context_items": twin_read,
+                }
+            )
+        else:
+            steps.append(step)
+    return steps
+
+
 @router.post("/events", response_model=EventResponse)
 def create_event(payload: EventCreateRequest, db: Session = Depends(get_db)) -> RawEvent:
     participant = find_by_raw_token(db, payload.token)
@@ -46,16 +114,16 @@ def _completed_step_ids(db: Session, session_id: str) -> list[str]:
 
 def _session_state(db: Session, session: ParticipantSession) -> SessionStateResponse:
     token = session.token
-    event_count = db.query(RawEvent).filter(RawEvent.session_id == session.id).count()
+    events = db.query(RawEvent).filter(RawEvent.session_id == session.id).order_by(RawEvent.created_at.asc()).all()
     return SessionStateResponse(
         session_id=session.id,
         token_id=session.token_id,
         token_status=token.status,
         session_status=session.status,
         current_step=session.current_step,
-        steps=SCENARIO_STEPS,
-        completed_step_ids=_completed_step_ids(db, session.id),
-        event_count=event_count,
+        steps=_steps_for_session(events),
+        completed_step_ids=[event.payload.get("step_id") for event in events if event.payload.get("step_id")],
+        event_count=len(events),
     )
 
 

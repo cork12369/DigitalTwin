@@ -23,6 +23,11 @@ services:
       APP_SECRET_KEY: change-me-in-production
       CORS_ORIGINS: http://localhost:3000
       PUBLIC_WEB_URL: http://localhost:3000
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-4o-mini}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      OPENROUTER_SITE_URL: ${OPENROUTER_SITE_URL:-http://localhost:3000}
+      OPENROUTER_APP_NAME: ${OPENROUTER_APP_NAME:-Digital Twin Prototype}
     ports:
       - "8000:8000"
     depends_on:
@@ -34,6 +39,7 @@ services:
       context: ./apps/web
     environment:
       NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+      API_INTERNAL_BASE_URL: http://api:8000
     ports:
       - "3000:3000"
     depends_on:

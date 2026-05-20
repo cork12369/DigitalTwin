@@ -10,6 +10,8 @@ type ScenarioStep = {
     title: string;
     prompt: string;
     options?: string[] | null;
+    context_title?: string | null;
+    context_items?: string[] | null;
 };
 
 type SessionState = {
@@ -137,6 +139,17 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
             <progress value={state.completed_step_ids.length} max={state.steps.length} />
             <h2>{currentStep.title}</h2>
             <p className="muted">{currentStep.prompt}</p>
+
+            {currentStep.context_items && currentStep.context_items.length > 0 && (
+                <div className="context-panel stack">
+                    <strong>{currentStep.context_title ?? "Context"}</strong>
+                    <ul>
+                        {currentStep.context_items.map((item) => (
+                            <li key={item}>{item}</li>
+                        ))}
+                    </ul>
+                </div>
+            )}
 
             {(currentStep.type === "triad" || currentStep.type === "duel") && currentStep.options && (
                 <div className="stack">
