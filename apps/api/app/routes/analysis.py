@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 
 from app.database import get_db
+from app.dependencies import require_admin_secret
 from app.models import AnalysisRun, BehavioralEvidence, ErrorReport, ParticipantSession, ParticipantToken, RawEvent, now_utc
 from app.schemas import (
     AdminActivityResponse,
@@ -16,7 +17,7 @@ from app.schemas import (
 )
 from app.services.analysis_service import analyze_token
 
-router = APIRouter(prefix="/api/admin", tags=["analysis"])
+router = APIRouter(prefix="/api/admin", tags=["analysis"], dependencies=[Depends(require_admin_secret)])
 
 
 def _token_summary(db: Session, participant: ParticipantToken) -> AdminTokenSummaryResponse:

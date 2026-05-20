@@ -1,113 +1,201 @@
+from __future__ import annotations
+
+from copy import deepcopy
 from typing import Any
 
 
-SCENARIO_STEPS: list[dict[str, Any]] = [
+MIN_ADAPTIVE_QUESTIONS = 5
+MAX_ADAPTIVE_QUESTIONS = 8
+COMPLETION_CONFIDENCE = 0.80
+
+ONBOARDING_STEP: dict[str, Any] = {
+    "id": "onboarding_profile",
+    "type": "onboarding",
+    "title": "Tailor Your Behavioral Mirror",
+    "prompt": "Share a short overview of your background, regular hobbies, work, or a project you are currently focused on.",
+}
+
+FALLBACK_QUESTIONS: list[dict[str, Any]] = [
     {
-        "id": "intro",
-        "type": "intro",
-        "title": "Behavioral Mirror Setup",
-        "prompt": "This short scenario learns how your values interact under pressure. There are no right answers.",
-    },
-    {
-        "id": "triad_1",
         "type": "triad",
-        "title": "Triad 1: Pressure Response",
-        "prompt": "When a decision is urgent and information is incomplete, which do you notice first?",
-        "options": ["Risk to people", "Speed of execution", "Long-term consequences"],
-    },
-    {
-        "id": "triad_2",
-        "type": "triad",
-        "title": "Triad 2: Ambiguity Frame",
-        "prompt": "When a situation is ambiguous, which framing feels most natural?",
-        "options": ["Clarify the rules", "Look for hidden trade-offs", "Test with a small action"],
-    },
-    {
-        "id": "triad_3",
-        "type": "triad",
-        "title": "Triad 3: Trust Signal",
-        "prompt": "Which signal most increases your trust in a recommendation?",
-        "options": ["Transparent reasoning", "Past performance", "Alignment with values"],
-    },
-    {
-        "id": "duel_1",
-        "type": "duel",
-        "title": "Trade-off Duel 1",
-        "prompt": "Choose the option you would defend if resources are limited.",
-        "options": ["Protect quality even if delivery slows", "Ship sooner and improve later"],
-    },
-    {
-        "id": "duel_2",
-        "type": "duel",
-        "title": "Trade-off Duel 2",
-        "prompt": "Which is more acceptable in a prototype?",
-        "options": ["More manual control with fewer surprises", "More automation with more monitoring"],
-    },
-    {
-        "id": "duel_3",
-        "type": "duel",
-        "title": "Trade-off Duel 3",
-        "prompt": "If users disagree with the twin, what should the system prioritize?",
-        "options": ["Ask for correction immediately", "Show why it inferred that answer first"],
-    },
-    {
-        "id": "context_flip_1",
-        "type": "context_flip",
-        "title": "Context Flip 1",
-        "prompt": "You chose a cautious path. Would your answer change if the decision only affected you, not a team? Explain briefly.",
-    },
-    {
-        "id": "context_flip_2",
-        "type": "context_flip",
-        "title": "Context Flip 2",
-        "prompt": "You chose speed or control earlier. Would your answer change if the outcome became public? Explain briefly.",
-    },
-    {
-        "id": "twin_rank_1",
-        "type": "twin_rank",
-        "title": "Twin Response Ranking",
-        "prompt": "Rank which preliminary twin response sounds closest to you.",
+        "title": "Pressure Around a Real Project",
+        "prompt": "A project connected to your background suddenly has a visible problem. What do you prioritize first?",
         "options": [
-            "I would slow down, clarify the hidden risks, then act.",
-            "I would move quickly with a reversible decision and monitor closely.",
-            "I would ask who is affected first, then choose the least harmful path.",
+            "Find who could be affected and reduce their risk first.",
+            "Make the smallest fast fix that gets momentum back.",
+            "Slow down enough to protect the long-term structure and standards.",
         ],
     },
     {
-        "id": "correction_1",
-        "type": "correction",
-        "title": "Correction Loop",
-        "prompt": "What did the preliminary twin misunderstand or miss about your reasoning?",
+        "type": "duel",
+        "title": "Guardrails or Speed",
+        "prompt": "You can either add stronger checks now or move faster and refine after feedback. Which would you defend?",
+        "options": [
+            "Add the guardrails now, even if the next step takes longer.",
+            "Ship the next useful version now and improve the details after feedback.",
+        ],
+    },
+    {
+        "type": "triad",
+        "title": "Ambiguous Trade-Off",
+        "prompt": "A decision in your domain has incomplete information and competing expectations. What deserves the most attention?",
+        "options": [
+            "The people who might absorb the cost of a wrong decision.",
+            "The fastest reversible action that reveals more information.",
+            "The principle or architecture that should still hold after the rush.",
+        ],
+    },
+    {
+        "type": "duel",
+        "title": "Quality Threshold",
+        "prompt": "A useful outcome is close, but quality checks may delay it. Which path better matches your default instinct?",
+        "options": [
+            "Protect the quality threshold before widening access.",
+            "Get the useful version in front of people and tighten quality as it evolves.",
+        ],
+    },
+    {
+        "type": "triad",
+        "title": "Trust Under Pressure",
+        "prompt": "When others are waiting on your call, which signal most shapes whether you trust the next move?",
+        "options": [
+            "It clearly reduces harm or confusion for affected people.",
+            "It can be executed quickly enough to prevent drift.",
+            "It keeps the system understandable and maintainable later.",
+        ],
+    },
+    {
+        "type": "triad",
+        "title": "Public Outcome",
+        "prompt": "If the decision became public in your community or workplace, what would you most want to be able to explain?",
+        "options": [
+            "How you protected the people most exposed to the outcome.",
+            "Why moving quickly was the practical way to limit damage.",
+            "Why the decision preserved standards that matter beyond this moment.",
+        ],
+    },
+    {
+        "type": "duel",
+        "title": "Iteration Boundary",
+        "prompt": "A fast iteration would teach you a lot, but it may create cleanup work. Which trade-off do you choose?",
+        "options": [
+            "Set firmer constraints first so the cleanup does not compound.",
+            "Run the iteration now and use what it teaches to decide the cleanup.",
+        ],
+    },
+    {
+        "type": "triad",
+        "title": "Final Calibration",
+        "prompt": "At the end of a pressured cycle, what evidence would most change your next decision?",
+        "options": [
+            "A clearer view of who was helped, confused, or put at risk.",
+            "Proof that the fast path created enough learning or relief.",
+            "Evidence that the solution remains stable, fair, and reusable.",
+        ],
     },
 ]
 
+TRIAD_TRAIT_AXES = {
+    0: "risk_to_people",
+    1: "speed_of_execution",
+    2: "long_term_stability",
+}
 
-STEP_BY_ID = {step["id"]: step for step in SCENARIO_STEPS}
-STEP_IDS = [step["id"] for step in SCENARIO_STEPS]
+DUEL_TRAIT_AXES = {
+    0: "quality_guardrails",
+    1: "ship_fast_iteration",
+}
 
 
-def get_step(step_id: str) -> dict[str, Any] | None:
-    return STEP_BY_ID.get(step_id)
+def initial_adaptive_state() -> dict[str, Any]:
+    return {
+        "confidence": 0.0,
+        "axis_scores": {
+            "risk_to_people": 0,
+            "speed_of_execution": 0,
+            "long_term_stability": 0,
+            "quality_guardrails": 0,
+            "ship_fast_iteration": 0,
+        },
+        "signals": [],
+    }
 
 
-def get_next_step_id(step_id: str) -> str | None:
-    try:
-        index = STEP_IDS.index(step_id)
-    except ValueError:
-        return None
+def normalize_generated_step(raw_step: dict[str, Any], question_number: int) -> dict[str, Any]:
+    step_type = raw_step.get("type")
+    option_count = 2 if step_type == "duel" else 3
+    options = raw_step.get("options")
+    if not isinstance(options, list):
+        options = []
 
-    next_index = index + 1
-    if next_index >= len(STEP_IDS):
-        return None
-    return STEP_IDS[next_index]
+    normalized_options = [
+        str(option).strip()
+        for option in options[:option_count]
+        if isinstance(option, str) and option.strip()
+    ]
+    if len(normalized_options) != option_count:
+        fallback = fallback_step(question_number)
+        normalized_options = fallback["options"]
+        step_type = fallback["type"]
+
+    if step_type not in {"triad", "duel"}:
+        fallback = fallback_step(question_number)
+        step_type = fallback["type"]
+        normalized_options = fallback["options"]
+
+    return {
+        "id": f"adaptive_q_{question_number}",
+        "type": step_type,
+        "title": _string_or_default(raw_step.get("title"), f"Adaptive Question {question_number}"),
+        "prompt": _string_or_default(raw_step.get("prompt"), fallback_step(question_number)["prompt"]),
+        "options": normalized_options,
+    }
+
+
+def fallback_step(question_number: int) -> dict[str, Any]:
+    raw_step = deepcopy(FALLBACK_QUESTIONS[(question_number - 1) % len(FALLBACK_QUESTIONS)])
+    raw_step["id"] = f"adaptive_q_{question_number}"
+    return raw_step
+
+
+def scenario_steps_for_token(adaptive_steps: list[dict[str, Any]] | None, include_onboarding: bool = True) -> list[dict[str, Any]]:
+    steps = [deepcopy(ONBOARDING_STEP)] if include_onboarding else []
+    steps.extend(deepcopy(adaptive_steps or []))
+    return steps
+
+
+def get_token_step(adaptive_steps: list[dict[str, Any]] | None, step_id: str) -> dict[str, Any] | None:
+    if step_id == ONBOARDING_STEP["id"]:
+        return deepcopy(ONBOARDING_STEP)
+    for step in adaptive_steps or []:
+        if step.get("id") == step_id:
+            return deepcopy(step)
+    return None
 
 
 def event_type_for_step(step_type: str) -> str:
     return {
-        "intro": "scenario_started",
+        "onboarding": "profile_submitted",
         "triad": "triad_answered",
         "duel": "duel_answered",
-        "context_flip": "context_flip_answered",
-        "twin_rank": "twin_response_ranked",
-        "correction": "correction_submitted",
     }.get(step_type, "scenario_step_answered")
+
+
+def trait_axis_for_choice(step_type: str, selected_index: int) -> str | None:
+    if step_type == "triad":
+        return TRIAD_TRAIT_AXES.get(selected_index)
+    if step_type == "duel":
+        return DUEL_TRAIT_AXES.get(selected_index)
+    return None
+
+
+def should_complete(adaptive_answer_count: int, confidence: float) -> bool:
+    return adaptive_answer_count >= MAX_ADAPTIVE_QUESTIONS or (
+        adaptive_answer_count >= MIN_ADAPTIVE_QUESTIONS and confidence >= COMPLETION_CONFIDENCE
+    )
+
+
+def _string_or_default(value: Any, default: str) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return default

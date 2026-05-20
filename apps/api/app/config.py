@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str = "sqlite:///./digital_twin.db"
     app_secret_key: str = "change-me-in-production"
+    admin_api_secret: str = "change-me-admin-api-secret"
     cors_origins: str = "http://localhost:3000"
     public_web_url: str = "http://localhost:3000"
     openrouter_api_key: str = ""

@@ -2,7 +2,7 @@ import Link from "next/link";
 
 import { analyzeTokenAction } from "../actions";
 import { type AnalysisRunDetail, type TokenDetail } from "@/lib/api";
-import { API_SERVER_BASE_URL } from "@/lib/api-server";
+import { adminApiFetch } from "@/lib/api-server";
 
 type PageProps = {
     params: Promise<{ tokenId: string }>;
@@ -15,7 +15,7 @@ function formatDate(value: string | null) {
 
 async function getTokenDetail(tokenId: string): Promise<TokenDetail | null> {
     try {
-        const response = await fetch(`${API_SERVER_BASE_URL}/api/admin/tokens/${tokenId}/detail`, { cache: "no-store" });
+        const response = await adminApiFetch(`/api/admin/tokens/${tokenId}/detail`, { cache: "no-store" });
         if (!response.ok) return null;
         return response.json();
     } catch {
@@ -26,7 +26,7 @@ async function getTokenDetail(tokenId: string): Promise<TokenDetail | null> {
 async function getRunDetail(runId: string | undefined): Promise<AnalysisRunDetail | null> {
     if (!runId) return null;
     try {
-        const response = await fetch(`${API_SERVER_BASE_URL}/api/admin/analysis-runs/${runId}`, { cache: "no-store" });
+        const response = await adminApiFetch(`/api/admin/analysis-runs/${runId}`, { cache: "no-store" });
         if (!response.ok) return null;
         return response.json();
     } catch {
@@ -62,6 +62,7 @@ export default async function TokenDetailPage({ params }: PageProps) {
                     </p>
                     <div className="row" style={{ justifyContent: "flex-start" }}>
                         <Link className="button secondary" href="/admin/tokens">Back to Tokens</Link>
+                        <Link className="button secondary" href="/admin/logout">Lock Admin</Link>
                         <form action={analyzeTokenAction}>
                             <input type="hidden" name="tokenId" value={tokenId} />
                             <button className="button" type="submit">Run Analysis</button>

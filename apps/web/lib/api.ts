@@ -9,6 +9,8 @@ export type ParticipantToken = {
     id: string;
     label: string;
     status: string;
+    auth_key?: string | null;
+    invite_url?: string | null;
     created_at: string;
     expires_at: string | null;
     first_used_at: string | null;

@@ -21,6 +21,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://digital_twin:digital_twin_dev_password@db:5432/digital_twin
       APP_SECRET_KEY: change-me-in-production
+      ADMIN_API_SECRET: ${ADMIN_API_SECRET:-change-me-admin-api-secret}
       CORS_ORIGINS: http://localhost:3000
       PUBLIC_WEB_URL: http://localhost:3000
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -40,6 +41,9 @@ services:
     environment:
       NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
       API_INTERNAL_BASE_URL: http://api:8000
+      ADMIN_PANEL_PASSWORD: ${ADMIN_PANEL_PASSWORD:-change-me-admin-password}
+      ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:-change-me-admin-session-secret}
+      ADMIN_API_SECRET: ${ADMIN_API_SECRET:-change-me-admin-api-secret}
     ports:
       - "3000:3000"
     depends_on:

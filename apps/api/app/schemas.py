@@ -14,6 +14,7 @@ class TokenResponse(BaseModel):
     id: str
     label: str
     status: TokenStatus
+    auth_key: str | None = None
     created_at: datetime
     expires_at: datetime | None
     first_used_at: datetime | None
@@ -126,6 +127,10 @@ class SessionStateResponse(BaseModel):
     steps: list[ScenarioStep]
     completed_step_ids: list[str]
     event_count: int
+    adaptive_question_count: int = 0
+    max_adaptive_questions: int = 8
+    scenario_generation_status: str | None = None
+    scenario_generation_message: str | None = None
 
 
 class StepAnswerRequest(BaseModel):
@@ -153,6 +158,7 @@ class AdminTokenSummaryResponse(TokenResponse):
     event_count: int = 0
     latest_analysis_status: AnalysisStatus | None = None
     evidence_count: int = 0
+    invite_url: str | None = None
 
 
 class AnalysisArtifactResponse(BaseModel):
