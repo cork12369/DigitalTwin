@@ -30,6 +30,9 @@ services:
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       OPENROUTER_SITE_URL: ${OPENROUTER_SITE_URL:-http://localhost:3000}
       OPENROUTER_APP_NAME: ${OPENROUTER_APP_NAME:-Digital Twin Prototype}
+      OPENVIKING_BASE_URL: ${OPENVIKING_BASE_URL:-}
+      OPENVIKING_API_KEY: ${OPENVIKING_API_KEY:-}
+      OPENVIKING_TIMEOUT_SECONDS: ${OPENVIKING_TIMEOUT_SECONDS:-20}
     ports:
       - "8000:8000"
     depends_on:

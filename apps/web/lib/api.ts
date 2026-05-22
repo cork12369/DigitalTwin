@@ -50,6 +50,20 @@ export type AnalysisRun = {
     created_at: string;
 };
 
+export type WorkflowRun = {
+    id: string;
+    token_id: string | null;
+    name: string;
+    status: string;
+    input_summary: string | null;
+    output_summary: string | null;
+    error_summary: string | null;
+    metadata_json: Record<string, unknown>;
+    started_at: string | null;
+    completed_at: string | null;
+    created_at: string;
+};
+
 export type TwinHarnessRun = {
     id: string;
     token_id: string;
@@ -106,6 +120,24 @@ export type TwinHarnessScore = {
 export type TwinHarnessRunDetail = TwinHarnessRun & {
     cases: TwinHarnessCase[];
     scores: TwinHarnessScore[];
+};
+
+export type OpenVikingStatus = {
+    configured: boolean;
+    status: string;
+    base_url: string | null;
+    message: string;
+    detail: Record<string, unknown>;
+};
+
+export type OpenVikingTokenState = {
+    token_id: string;
+    root_uri: string;
+    status: OpenVikingStatus;
+    latest_sync_run?: WorkflowRun | null;
+    latest_test_run?: TwinHarnessRun | null;
+    mirrored_source_count: number;
+    last_error?: string | null;
 };
 
 export type AnalysisArtifact = {

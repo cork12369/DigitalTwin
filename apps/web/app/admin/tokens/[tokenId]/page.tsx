@@ -2,7 +2,8 @@ import Link from "next/link";
 
 import { analyzeTokenAction } from "../actions";
 import { HarnessRunButton } from "./harness-run-button";
-import { type AnalysisRunDetail, type TokenDetail, type TrainingDiagnostics, type TwinHarnessRunDetail, type TwinHarnessScore } from "@/lib/api";
+import { OpenVikingTestButton } from "./openviking-test-button";
+import { type AnalysisRunDetail, type OpenVikingTokenState, type TokenDetail, type TrainingDiagnostics, type TwinHarnessRunDetail, type TwinHarnessScore } from "@/lib/api";
 import { adminApiFetch } from "@/lib/api-server";
 
 type PageProps = {
@@ -54,6 +55,16 @@ async function getHarnessRunDetail(runId: string | undefined): Promise<TwinHarne
     if (!runId) return null;
     try {
         const response = await adminApiFetch(`/api/admin/harness/runs/${runId}`, { cache: "no-store" });
+        if (!response.ok) return null;
+        return response.json();
+    } catch {
+        return null;
+    }
+}
+
+async function getOpenVikingState(tokenId: string): Promise<OpenVikingTokenState | null> {
+    try {
+        const response = await adminApiFetch(`/api/admin/tokens/${tokenId}/openviking/state`, { cache: "no-store" });
         if (!response.ok) return null;
         return response.json();
     } catch {
@@ -114,6 +125,11 @@ function summarizeScores(scores: TwinHarnessScore[], sourceType: string, metricT
         verdict: Object.entries(value.verdicts).sort((left, right) => right[1] - left[1])[0]?.[0] ?? "mixed",
         count: value.count,
     }));
+}
+
+function summarizeScoresByPrefix(scores: TwinHarnessScore[], sourcePrefix: string, metricType?: string): ScoreSummary[] {
+    const sourceTypes = new Set(scores.filter((score) => score.source_type.startsWith(sourcePrefix)).map((score) => score.source_type));
+    return [...sourceTypes].flatMap((sourceType) => summarizeScores(scores, sourceType, metricType));
 }
 
 function ScoreList({ title, scores, empty }: { title: string; scores: ScoreSummary[]; empty: string }) {
@@ -203,12 +219,98 @@ function HarnessDiagnostics({ run }: { run: TwinHarnessRunDetail | null }) {
     );
 }
 
+function OpenVikingDiagnostics({ state, run, tokenId }: { state: OpenVikingTokenState | null; run: TwinHarnessRunDetail | null; tokenId: string }) {
+    if (!state) {
+        return <p className="muted">OpenViking diagnostics are unavailable.</p>;
+    }
+
+    const aggregate = run?.aggregate_metrics ?? {};
+    const retrievedRankings = run
+        ? summarizeScoresByPrefix(run.scores, "openviking_", "isolated_lift")
+            .filter((score) => score.key.includes("openviking_") && !score.key.includes("openviking_bundle"))
+            .sort((left, right) => right.averageLift - left.averageLift)
+        : [];
+    const bundleScores = run ? summarizeScores(run.scores, "openviking_bundle", "bundle_lift") : [];
+    const negativeSources = retrievedRankings
+        .filter((score) => score.verdict === "negative_drift")
+        .sort((left, right) => left.averageLift - right.averageLift);
+    const inertSources = retrievedRankings
+        .filter((score) => score.verdict === "zero_impact")
+        .sort((left, right) => Math.abs(left.averageLift) - Math.abs(right.averageLift));
+    const traceScores = run ? run.scores.filter((score) => score.source_type.startsWith("openviking_") && score.source_type !== "openviking_bundle").slice(0, 8) : [];
+
+    return (
+        <div className="stack">
+            <div className="grid">
+                <article className="compact-panel">
+                    <h3>Sidecar</h3>
+                    <div className="status"><span className="dot" />{state.status.status}</div>
+                    <p className="muted">{state.status.message}</p>
+                    <p className="muted">Base URL: {state.status.base_url ?? "not configured"}</p>
+                </article>
+                <article className="compact-panel">
+                    <h3>Latest Sync</h3>
+                    <div className="status"><span className="dot" />{state.latest_sync_run?.status ?? "not run"}</div>
+                    <p className="muted">Mirrored sources: {state.mirrored_source_count}</p>
+                    <p className="muted">Root: {state.root_uri}</p>
+                </article>
+                <article className="compact-panel">
+                    <h3>Latest Test</h3>
+                    <div className="status"><span className="dot" />{state.latest_test_run?.status ?? "not run"}</div>
+                    <p className="muted">Retrieved sources: {String(aggregate.openviking_retrieved_source_count ?? 0)}</p>
+                    <p className="muted">OpenViking scores: {String(aggregate.openviking_score_count ?? 0)}</p>
+                </article>
+            </div>
+
+            <div className="row" style={{ justifyContent: "flex-start" }}>
+                <OpenVikingTestButton tokenId={tokenId} />
+            </div>
+            {state.latest_sync_run?.error_summary && <p className="error">{state.latest_sync_run.error_summary}</p>}
+            {run?.error_summary && <p className="error">{run.error_summary}</p>}
+            {run?.output_summary && <p className="muted">{run.output_summary}</p>}
+
+            <div className="context-panel">
+                <strong>Experimental only</strong>
+                <p className="muted">
+                    This panel tests OpenViking retrieval against held-out decisions. It does not change participant prompts, training, or live twin behavior.
+                </p>
+            </div>
+
+            <div className="grid">
+                <ScoreList title="OpenViking Source Lift" scores={retrievedRankings} empty="No OpenViking source scores yet." />
+                <ScoreList title="OpenViking Bundle Lift" scores={bundleScores} empty="No OpenViking bundle scores yet." />
+            </div>
+            <div className="grid">
+                <ScoreList title="OpenViking Negative Drift" scores={negativeSources} empty="No OpenViking negative-drift sources yet." />
+                <ScoreList title="OpenViking Inert Sources" scores={inertSources} empty="No OpenViking near-zero sources yet." />
+            </div>
+
+            <div className="compact-panel stack">
+                <h3>Retrieved URI Traces</h3>
+                {traceScores.length === 0 ? <p className="muted">No retrieved URI traces yet.</p> : traceScores.map((score) => (
+                    <div className="compact-panel" key={score.id}>
+                        <div className="row">
+                            <strong>{score.source_label ?? score.source_id ?? "OpenViking source"}</strong>
+                            <span className="muted">rank {String(score.metadata_json.retrieval_rank ?? "--")}</span>
+                        </div>
+                        <div className="muted">{String(score.metadata_json.viking_uri ?? "No URI")}</div>
+                        <div className="muted">score {String(score.metadata_json.relevance_score ?? "--")} | lift {formatMetric(score.lift)} | KL {formatMetric(score.kl_divergence)}</div>
+                        {score.metadata_json.match_reason ? <p className="muted">{String(score.metadata_json.match_reason)}</p> : null}
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 export default async function TokenDetailPage({ params }: PageProps) {
     const { tokenId } = await params;
     const detail = await getTokenDetail(tokenId);
     const latestRun = detail?.analysis_runs[0];
     const latestRunDetail = await getRunDetail(latestRun?.id);
     const latestHarnessDetail = await getHarnessRunDetail(detail?.latest_harness_run?.id);
+    const openVikingState = detail ? await getOpenVikingState(tokenId) : null;
+    const latestOpenVikingRunDetail = await getHarnessRunDetail(openVikingState?.latest_test_run?.id);
     const trainingDiagnostics = detail ? await getTrainingDiagnostics(tokenId) : null;
 
     if (!detail) {
@@ -305,6 +407,14 @@ export default async function TokenDetailPage({ params }: PageProps) {
                         <HarnessRunButton tokenId={tokenId} />
                     </div>
                     <HarnessDiagnostics run={latestHarnessDetail} />
+                </section>
+
+                <section className="panel stack">
+                    <div>
+                        <h2>OpenViking Retrieval Test</h2>
+                        <p className="muted">Experimental admin-only source selection comparison using the optional OpenViking sidecar.</p>
+                    </div>
+                    <OpenVikingDiagnostics state={openVikingState} run={latestOpenVikingRunDetail} tokenId={tokenId} />
                 </section>
 
                 <section className="grid">

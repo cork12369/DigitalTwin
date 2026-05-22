@@ -40,6 +40,7 @@ from app.services.adaptive_scenario_service import (
     record_adaptive_choice_signal,
 )
 from app.services.harness_service import queue_harness_run, run_harness_job
+from app.services.openviking_service import queue_openviking_sync, run_openviking_sync_job
 from app.services.profile_service import ProfileIngestionResult, build_manual_profile, ingest_cv_pdf
 from app.services.token_service import find_by_raw_token, get_or_create_session, validate_and_touch_token
 
@@ -205,6 +206,9 @@ def _queue_completed_harness(
     run = queue_harness_run(db, participant, trigger_reason)
     if run is not None:
         background_tasks.add_task(run_harness_job, run.id)
+    sync_run = queue_openviking_sync(db, participant, trigger_reason)
+    if sync_run is not None:
+        background_tasks.add_task(run_openviking_sync_job, sync_run.id)
 
 
 def _answer_onboarding(

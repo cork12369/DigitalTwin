@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import httpx
@@ -65,6 +65,7 @@ class HarnessSource:
     source_id: str
     source_label: str
     text: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class OpenRouterLogprobScorer:
@@ -167,6 +168,7 @@ def run_harness_for_token(
     participant: ParticipantToken,
     trigger_reason: str = "manual_admin",
     scorer: LogprobScorer | None = None,
+    include_openviking: bool = False,
 ) -> TwinHarnessRun:
     run = TwinHarnessRun(
         token_id=participant.id,
@@ -175,7 +177,7 @@ def run_harness_for_token(
         model_name=(scorer.model_name if scorer is not None else get_settings().openrouter_model),
         prompt_version=PROMPT_VERSION,
         input_summary="Manual admin diagnostics harness run.",
-        aggregate_metrics={},
+        aggregate_metrics={"openviking_enabled": include_openviking},
     )
     db.add(run)
     db.commit()
@@ -268,6 +270,7 @@ def _execute_harness_run(db: Session, run: TwinHarnessRun, scorer: LogprobScorer
 
         memory_sources = _memory_sources(db, participant)
         questionnaire_sources = _questionnaire_sources(db, participant)
+        include_openviking = bool((run.aggregate_metrics or {}).get("openviking_enabled"))
         run.input_summary = (
             f"{len(case_candidates)} held-out cases, {len(memory_sources)} reviewed memory cards, "
             f"{len(questionnaire_sources)} questionnaire signals."
@@ -276,6 +279,9 @@ def _execute_harness_run(db: Session, run: TwinHarnessRun, scorer: LogprobScorer
 
         active_scorer = scorer or OpenRouterLogprobScorer()
         score_count = 0
+        openviking_score_count = 0
+        openviking_retrieval_count = 0
+        openviking_failures: list[dict[str, Any]] = []
         case_rows: list[TwinHarnessCase] = []
         for case_candidate in case_candidates:
             baseline_prompt = _build_prompt(participant, case_candidate, [])
@@ -340,11 +346,46 @@ def _execute_harness_run(db: Session, run: TwinHarnessRun, scorer: LogprobScorer
                 source_type="question_event",
                 scorer=active_scorer,
             )
+            if include_openviking:
+                retrieval = _retrieve_openviking_sources(participant, case_candidate)
+                case_row.metadata_json = {
+                    **(case_row.metadata_json or {}),
+                    "openviking_retrieval": retrieval.metadata,
+                }
+                if retrieval.status != "ok":
+                    openviking_failures.append(
+                        {
+                            "case_id": case_row.id,
+                            "target_event_id": case_candidate.target_event_id,
+                            "status": retrieval.status,
+                            "metadata": retrieval.metadata,
+                        }
+                    )
+                openviking_retrieval_count += len(retrieval.sources)
+                scored = _score_openviking_sources(
+                    db=db,
+                    run=run,
+                    case=case_row,
+                    participant=participant,
+                    case_candidate=case_candidate,
+                    sources=retrieval.sources,
+                    baseline_logprobs=baseline_logprobs,
+                    scorer=active_scorer,
+                )
+                openviking_score_count += scored
+                score_count += scored
             db.commit()
 
         run.status = HarnessStatus.completed
         run.output_summary = f"Scored {len(case_rows)} held-out cases and stored {score_count} source-effect scores."
-        run.aggregate_metrics = _aggregate_scores(db, run.id, skipped_targets, len(memory_sources), len(questionnaire_sources))
+        run.aggregate_metrics = {
+            **_aggregate_scores(db, run.id, skipped_targets, len(memory_sources), len(questionnaire_sources)),
+            "openviking_enabled": include_openviking,
+            "openviking_retrieved_source_count": openviking_retrieval_count,
+            "openviking_score_count": openviking_score_count,
+            "openviking_failure_count": len(openviking_failures),
+            "openviking_failures": openviking_failures[:8],
+        }
         run.completed_at = now_utc()
         db.commit()
         db.refresh(run)
@@ -440,7 +481,80 @@ def _score_marginal_sources(
     return count
 
 
-def _sources_without_target(sources: list[HarnessSource], case_candidate: HarnessCaseCandidate) -> list[HarnessSource]:
+def _score_openviking_sources(
+    db: Session,
+    run: TwinHarnessRun,
+    case: TwinHarnessCase,
+    participant: ParticipantToken,
+    case_candidate: HarnessCaseCandidate,
+    sources: list[Any],
+    baseline_logprobs: dict[str, float],
+    scorer: LogprobScorer,
+) -> int:
+    active_sources = _sources_without_target(sources, case_candidate)
+    if not active_sources:
+        return 0
+    count = 0
+    labels = [action["label"] for action in case_candidate.candidate_actions]
+    for source in active_sources:
+        conditioned_prompt = _build_prompt(participant, case_candidate, [source])
+        conditioned_logprobs = scorer.score(conditioned_prompt, labels)
+        db.add(
+            _score_row(
+                run=run,
+                case=case,
+                source=source,
+                source_type=source.source_type,
+                metric_type="isolated_lift",
+                base_logprobs=baseline_logprobs,
+                conditioned_logprobs=conditioned_logprobs,
+                target_label=case_candidate.human_target_label,
+            )
+        )
+        count += 1
+
+    bundle_prompt = _build_prompt(participant, case_candidate, active_sources)
+    bundle_logprobs = scorer.score(bundle_prompt, labels)
+    bundle_source = HarnessSource(
+        source_type="openviking_bundle",
+        source_id=f"bundle:{case.id}",
+        source_label="OpenViking retrieved bundle",
+        text="\n\n".join(source.text for source in active_sources),
+        metadata={
+            "provider": "openviking",
+            "source_count": len(active_sources),
+            "source_uris": [source.metadata.get("viking_uri") for source in active_sources if source.metadata.get("viking_uri")],
+            "source_ids": [source.source_id for source in active_sources],
+        },
+    )
+    db.add(
+        _score_row(
+            run=run,
+            case=case,
+            source=bundle_source,
+            source_type="openviking_bundle",
+            metric_type="bundle_lift",
+            base_logprobs=baseline_logprobs,
+            conditioned_logprobs=bundle_logprobs,
+            target_label=case_candidate.human_target_label,
+        )
+    )
+    return count + 1
+
+
+def _retrieve_openviking_sources(participant: ParticipantToken, case_candidate: HarnessCaseCandidate):
+    from app.services.openviking_service import retrieve_openviking_sources_for_case
+
+    return retrieve_openviking_sources_for_case(
+        participant,
+        situation=case_candidate.situation,
+        candidate_actions=case_candidate.candidate_actions,
+        target_event_id=case_candidate.target_event_id,
+        limit=MAX_SOURCES_PER_TYPE,
+    )
+
+
+def _sources_without_target(sources: list[Any], case_candidate: HarnessCaseCandidate) -> list[Any]:
     return [source for source in sources if source.source_id != case_candidate.target_event_id]
 
 
@@ -476,7 +590,7 @@ def _score_row(
         verdict=verdict_for(lift, kl_value),
         distribution_base=base_distribution,
         distribution_conditioned=conditioned_distribution,
-        metadata_json={"target_label": target_label},
+        metadata_json={"target_label": target_label, **(source.metadata or {})},
     )
 
 

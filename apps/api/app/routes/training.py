@@ -22,6 +22,7 @@ from app.schemas import (
 )
 from app.services.token_service import validate_and_touch_token
 from app.services.harness_service import queue_harness_run, run_harness_job
+from app.services.openviking_service import queue_openviking_sync, run_openviking_sync_job
 from app.services.training_service import (
     PAIR_BLOCK_SIZE,
     PILLARS,
@@ -219,6 +220,9 @@ def _queue_harness_background(
     run = queue_harness_run(db, participant, trigger_reason)
     if run is not None:
         background_tasks.add_task(run_harness_job, run.id)
+    sync_run = queue_openviking_sync(db, participant, trigger_reason)
+    if sync_run is not None:
+        background_tasks.add_task(run_openviking_sync_job, sync_run.id)
 
 
 def _cards_response(db: Session, participant: ParticipantToken) -> MemoryCardsResponse:

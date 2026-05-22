@@ -92,6 +92,14 @@ class WorkflowRunResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class OpenVikingStatusResponse(BaseModel):
+    configured: bool
+    status: str
+    base_url: str | None = None
+    message: str
+    detail: dict = Field(default_factory=dict)
+
+
 class ErrorReportResponse(BaseModel):
     id: str
     token_id: str | None
@@ -283,6 +291,16 @@ class TwinHarnessRunResponse(BaseModel):
 class TwinHarnessRunDetailResponse(TwinHarnessRunResponse):
     cases: list[TwinHarnessCaseResponse] = []
     scores: list[TwinHarnessScoreResponse] = []
+
+
+class OpenVikingTokenStateResponse(BaseModel):
+    token_id: str
+    root_uri: str
+    status: OpenVikingStatusResponse
+    latest_sync_run: WorkflowRunResponse | None = None
+    latest_test_run: TwinHarnessRunResponse | None = None
+    mirrored_source_count: int = 0
+    last_error: str | None = None
 
 
 class AdminTokenDetailResponse(BaseModel):

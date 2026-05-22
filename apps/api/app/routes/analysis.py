@@ -13,12 +13,20 @@ from app.schemas import (
     BehavioralEvidenceResponse,
     ErrorReportResponse,
     EventResponse,
+    OpenVikingStatusResponse,
+    OpenVikingTokenStateResponse,
     SessionResponse,
     TwinHarnessRunDetailResponse,
     TwinHarnessRunResponse,
 )
 from app.services.analysis_service import analyze_token
 from app.services.harness_service import get_harness_run, run_harness_for_token
+from app.services.openviking_service import (
+    OPENVIKING_TEST_TRIGGER,
+    openviking_status,
+    openviking_token_state,
+    sync_openviking_for_token,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["analysis"], dependencies=[Depends(require_admin_secret)])
 
@@ -102,6 +110,7 @@ def get_token_detail(token_id: str, db: Session = Depends(get_db)) -> AdminToken
     latest_harness_run = (
         db.query(TwinHarnessRun)
         .filter(TwinHarnessRun.token_id == token_id)
+        .filter(TwinHarnessRun.trigger_reason != OPENVIKING_TEST_TRIGGER)
         .order_by(TwinHarnessRun.created_at.desc())
         .first()
     )
@@ -135,6 +144,34 @@ def run_token_harness(token_id: str, db: Session = Depends(get_db)) -> TwinHarne
     if participant is None:
         raise HTTPException(status_code=404, detail="Token not found")
     return run_harness_for_token(db, participant, trigger_reason="manual_admin")
+
+
+@router.get("/openviking/status", response_model=OpenVikingStatusResponse)
+def get_openviking_status() -> dict:
+    return openviking_status()
+
+
+@router.get("/tokens/{token_id}/openviking/state", response_model=OpenVikingTokenStateResponse)
+def get_token_openviking_state(token_id: str, db: Session = Depends(get_db)) -> dict:
+    participant = db.get(ParticipantToken, token_id)
+    if participant is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+    return openviking_token_state(db, participant)
+
+
+@router.post("/tokens/{token_id}/openviking/test-run", response_model=OpenVikingTokenStateResponse)
+def run_token_openviking_test(token_id: str, db: Session = Depends(get_db)) -> dict:
+    participant = db.get(ParticipantToken, token_id)
+    if participant is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+    sync_openviking_for_token(db, participant, trigger_reason=OPENVIKING_TEST_TRIGGER)
+    run_harness_for_token(
+        db,
+        participant,
+        trigger_reason=OPENVIKING_TEST_TRIGGER,
+        include_openviking=True,
+    )
+    return openviking_token_state(db, participant)
 
 
 @router.get("/tokens/{token_id}/harness/runs", response_model=list[TwinHarnessRunResponse])
