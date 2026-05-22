@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import AnalysisArtifact, AnalysisRun, AnalysisStatus, BehavioralEvidence, ErrorCategory, ErrorReport, EvidenceType, ParticipantToken, RawEvent
-from app.scenario import STEP_BY_ID
+from app.scenario import trait_axis_for_choice
 
 
 PROMPT_VERSION = "reliability_first_v1"
@@ -37,13 +37,30 @@ TRADEOFF_MAP = {
 }
 
 
+def _dynamic_triad_signal(selected_index: int) -> tuple[EvidenceType, str]:
+    return {
+        0: (EvidenceType.noticed_first, "risk to people and user impact are noticed early"),
+        1: (EvidenceType.value_signal, "speed of execution and quick mitigation are salient"),
+        2: (EvidenceType.value_signal, "long-term stability, rules, and quality are salient"),
+    }.get(selected_index, (EvidenceType.value_signal, "selected option indicates a value signal"))
+
+
+def _dynamic_duel_signal(selected_index: int) -> str:
+    return {
+        0: "Quality guardrails are preferred even when execution slows.",
+        1: "Fast iteration is preferred with details improved later.",
+    }.get(selected_index, "Duel selection indicates a trade-off preference.")
+
+
 def _event_step(event: RawEvent) -> dict[str, Any]:
-    return STEP_BY_ID.get(event.payload.get("step_id"), {})
+    if isinstance(event.payload, dict) and isinstance(event.payload.get("step_snapshot"), dict):
+        return event.payload["step_snapshot"]
+    return {}
 
 
 def _supporting_quote(event: RawEvent) -> str | None:
     answer = event.payload.get("answer", {})
-    return answer.get("text") or answer.get("selected_option") or ", ".join(answer.get("ranked_options", [])) or None
+    return answer.get("text") or answer.get("correction_text") or answer.get("selected_option") or ", ".join(answer.get("ranked_options", [])) or None
 
 
 def _confidence(value: float) -> str:
@@ -98,31 +115,56 @@ def _extract_event(db: Session, run: AnalysisRun, event: RawEvent) -> None:
         "prompt": step.get("prompt"),
         "answer": answer,
         "available_options": step.get("options", []),
+        "replay_scenario_id": event.payload.get("replay_scenario_id"),
         "timestamp": event.created_at.isoformat() if event.created_at else None,
     }
     _create_artifact(db, run, "event_normalization", [event.id], normalized, 1.0)
 
     if step_type == "triad":
         selected = answer.get("selected_option")
-        evidence_type, phrase = VALUE_MAP.get(selected, (EvidenceType.value_signal, "selected option indicates a value signal"))
+        selected_index = answer.get("selected_index")
+        if type(selected_index) is int:
+            trait_axis = trait_axis_for_choice("triad", selected_index)
+            evidence_type, phrase = _dynamic_triad_signal(selected_index)
+            payload = {
+                "selected_index": selected_index,
+                "selected_option": selected,
+                "trait_axis": trait_axis,
+                "unselected_options": [option for index, option in enumerate(step.get("options", [])) if index != selected_index],
+            }
+        else:
+            evidence_type, phrase = VALUE_MAP.get(selected, (EvidenceType.value_signal, "selected option indicates a value signal"))
+            payload = {"selected_option": selected, "unselected_options": [option for option in step.get("options", []) if option != selected]}
         _create_evidence(
             db,
             run,
             event,
             evidence_type,
             f"Triad selection suggests {phrase}.",
-            {"selected_option": selected, "unselected_options": [option for option in step.get("options", []) if option != selected]},
+            payload,
             0.78,
         )
     elif step_type == "duel":
         selected = answer.get("selected_option")
+        selected_index = answer.get("selected_index")
+        if type(selected_index) is int:
+            phrase = _dynamic_duel_signal(selected_index)
+            payload = {
+                "selected_index": selected_index,
+                "selected_option": selected,
+                "trait_axis": trait_axis_for_choice("duel", selected_index),
+                "sacrificed_options": [option for index, option in enumerate(step.get("options", [])) if index != selected_index],
+            }
+        else:
+            phrase = TRADEOFF_MAP.get(selected, "Duel selection indicates a trade-off preference.")
+            payload = {"selected_option": selected, "sacrificed_options": [option for option in step.get("options", []) if option != selected]}
         _create_evidence(
             db,
             run,
             event,
             EvidenceType.tradeoff_preference,
-            TRADEOFF_MAP.get(selected, "Duel selection indicates a trade-off preference."),
-            {"selected_option": selected, "sacrificed_options": [option for option in step.get("options", []) if option != selected]},
+            phrase,
+            payload,
             0.82,
         )
     elif step_type == "context_flip":
@@ -132,6 +174,7 @@ def _extract_event(db: Session, run: AnalysisRun, event: RawEvent) -> None:
         payload = {
             "flip_detected": flip_detected,
             "possible_triggers": [term for term in ["public", "team", "only me", "accountability", "risk"] if term in lower],
+            "replay_scenario_id": event.payload.get("replay_scenario_id") or answer.get("replay_scenario_id"),
             "analysis_mode": "mock_reliability_first_open_ended",
             "requires_llm_review": True,
         }
@@ -164,15 +207,36 @@ def _extract_event(db: Session, run: AnalysisRun, event: RawEvent) -> None:
         )
     elif step_type == "twin_rank":
         ranked = answer.get("ranked_options", [])
+        rejected = answer.get("rejected_options", [])
+        correction_text = answer.get("correction_text", "")
+        payload = {
+            "ranked_options": ranked,
+            "rejected_options": rejected,
+            "closest": ranked[0] if ranked else None,
+            "correction_text": correction_text,
+            "replay_scenario_id": event.payload.get("replay_scenario_id") or answer.get("replay_scenario_id"),
+            "requires_llm_review": bool(correction_text),
+        }
         _create_evidence(
             db,
             run,
             event,
             EvidenceType.twin_ranking,
             "Twin ranking captures which preliminary interpretation feels closest to the user.",
-            {"ranked_options": ranked, "closest": ranked[0] if ranked else None},
+            payload,
             0.74,
         )
+        if correction_text:
+            _create_artifact(db, run, "twin_rank_correction_analysis", [event.id], payload, 0.78)
+            _create_evidence(
+                db,
+                run,
+                event,
+                EvidenceType.correction,
+                "Inline twin-response correction captured as a high-weight signal for future interpretation repair.",
+                payload,
+                0.78,
+            )
 
 
 def analyze_token(db: Session, participant: ParticipantToken) -> AnalysisRun:
@@ -206,6 +270,8 @@ def analyze_token(db: Session, participant: ParticipantToken) -> AnalysisRun:
                 "analysis_mode": "mock_reliability_first_consistency_pass",
                 "note": "Real LangChain pass should compare all extracted claims for contradictions and conditional policies.",
                 "evidence_count": evidence_count,
+                "adaptive_state": participant.adaptive_scenario_state or {},
+                "adaptive_generation_metadata": participant.scenario_generation_metadata or {},
             },
             0.65,
         )
@@ -221,6 +287,11 @@ def analyze_token(db: Session, participant: ParticipantToken) -> AnalysisRun:
                 "evidence_count": evidence_count,
                 "requires_llm_review": any(
                     event.payload.get("step_type") in {"context_flip", "correction"}
+                    or (
+                        event.payload.get("step_type") == "twin_rank"
+                        and isinstance(event.payload.get("answer"), dict)
+                        and bool(event.payload["answer"].get("correction_text"))
+                    )
                     for event in events
                 ),
             },

@@ -19,7 +19,7 @@ def hash_token(raw_token: str) -> str:
 
 def create_participant_token(db: Session, label: str, expires_at: datetime | None = None) -> tuple[ParticipantToken, str]:
     raw_token = generate_raw_token()
-    participant = ParticipantToken(label=label, token_hash=hash_token(raw_token), expires_at=expires_at)
+    participant = ParticipantToken(label=label, token_hash=hash_token(raw_token), auth_key=raw_token, expires_at=expires_at)
     db.add(participant)
     db.commit()
     db.refresh(participant)

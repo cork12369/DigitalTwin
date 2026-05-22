@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 
 from app.database import get_db
-from app.models import AnalysisRun, BehavioralEvidence, ErrorReport, ParticipantSession, ParticipantToken, RawEvent, now_utc
+from app.dependencies import require_admin_secret
+from app.models import AnalysisRun, BehavioralEvidence, ErrorReport, ParticipantSession, ParticipantToken, RawEvent, TwinHarnessRun, now_utc
 from app.schemas import (
     AdminActivityResponse,
     AdminTokenDetailResponse,
@@ -12,11 +13,22 @@ from app.schemas import (
     BehavioralEvidenceResponse,
     ErrorReportResponse,
     EventResponse,
+    OpenVikingStatusResponse,
+    OpenVikingTokenStateResponse,
     SessionResponse,
+    TwinHarnessRunDetailResponse,
+    TwinHarnessRunResponse,
 )
 from app.services.analysis_service import analyze_token
+from app.services.harness_service import get_harness_run, run_harness_for_token
+from app.services.openviking_service import (
+    OPENVIKING_TEST_TRIGGER,
+    openviking_status,
+    openviking_token_state,
+    sync_openviking_for_token,
+)
 
-router = APIRouter(prefix="/api/admin", tags=["analysis"])
+router = APIRouter(prefix="/api/admin", tags=["analysis"], dependencies=[Depends(require_admin_secret)])
 
 
 def _token_summary(db: Session, participant: ParticipantToken) -> AdminTokenSummaryResponse:
@@ -95,6 +107,13 @@ def get_token_detail(token_id: str, db: Session = Depends(get_db)) -> AdminToken
     events = db.query(RawEvent).filter(RawEvent.token_id == token_id).order_by(RawEvent.created_at.desc()).all()
     analysis_runs = db.query(AnalysisRun).filter(AnalysisRun.token_id == token_id).order_by(AnalysisRun.created_at.desc()).all()
     evidence = db.query(BehavioralEvidence).filter(BehavioralEvidence.token_id == token_id).order_by(BehavioralEvidence.created_at.desc()).all()
+    latest_harness_run = (
+        db.query(TwinHarnessRun)
+        .filter(TwinHarnessRun.token_id == token_id)
+        .filter(TwinHarnessRun.trigger_reason != OPENVIKING_TEST_TRIGGER)
+        .order_by(TwinHarnessRun.created_at.desc())
+        .first()
+    )
 
     return AdminTokenDetailResponse(
         participant=_token_summary(db, participant),
@@ -102,6 +121,7 @@ def get_token_detail(token_id: str, db: Session = Depends(get_db)) -> AdminToken
         events=[EventResponse.model_validate(event) for event in events],
         analysis_runs=[AnalysisRunResponse.model_validate(run) for run in analysis_runs],
         evidence=[BehavioralEvidenceResponse.model_validate(item) for item in evidence],
+        latest_harness_run=TwinHarnessRunResponse.model_validate(latest_harness_run) if latest_harness_run else None,
     )
 
 
@@ -116,6 +136,58 @@ def analyze_participant_token(token_id: str, db: Session = Depends(get_db)) -> A
 @router.get("/tokens/{token_id}/analysis-runs", response_model=list[AnalysisRunResponse])
 def list_analysis_runs(token_id: str, db: Session = Depends(get_db)) -> list[AnalysisRun]:
     return db.query(AnalysisRun).filter(AnalysisRun.token_id == token_id).order_by(AnalysisRun.created_at.desc()).all()
+
+
+@router.post("/tokens/{token_id}/harness/run", response_model=TwinHarnessRunDetailResponse)
+def run_token_harness(token_id: str, db: Session = Depends(get_db)) -> TwinHarnessRun:
+    participant = db.get(ParticipantToken, token_id)
+    if participant is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+    return run_harness_for_token(db, participant, trigger_reason="manual_admin")
+
+
+@router.get("/openviking/status", response_model=OpenVikingStatusResponse)
+def get_openviking_status() -> dict:
+    return openviking_status()
+
+
+@router.get("/tokens/{token_id}/openviking/state", response_model=OpenVikingTokenStateResponse)
+def get_token_openviking_state(token_id: str, db: Session = Depends(get_db)) -> dict:
+    participant = db.get(ParticipantToken, token_id)
+    if participant is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+    return openviking_token_state(db, participant)
+
+
+@router.post("/tokens/{token_id}/openviking/test-run", response_model=OpenVikingTokenStateResponse)
+def run_token_openviking_test(token_id: str, db: Session = Depends(get_db)) -> dict:
+    participant = db.get(ParticipantToken, token_id)
+    if participant is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+    sync_openviking_for_token(db, participant, trigger_reason=OPENVIKING_TEST_TRIGGER)
+    run_harness_for_token(
+        db,
+        participant,
+        trigger_reason=OPENVIKING_TEST_TRIGGER,
+        include_openviking=True,
+    )
+    return openviking_token_state(db, participant)
+
+
+@router.get("/tokens/{token_id}/harness/runs", response_model=list[TwinHarnessRunResponse])
+def list_token_harness_runs(token_id: str, db: Session = Depends(get_db)) -> list[TwinHarnessRun]:
+    participant = db.get(ParticipantToken, token_id)
+    if participant is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+    return db.query(TwinHarnessRun).filter(TwinHarnessRun.token_id == token_id).order_by(TwinHarnessRun.created_at.desc()).all()
+
+
+@router.get("/harness/runs/{run_id}", response_model=TwinHarnessRunDetailResponse)
+def get_token_harness_run(run_id: str, db: Session = Depends(get_db)) -> TwinHarnessRun:
+    run = get_harness_run(db, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Harness run not found")
+    return run
 
 
 @router.get("/analysis-runs/{analysis_run_id}", response_model=AnalysisRunDetailResponse)

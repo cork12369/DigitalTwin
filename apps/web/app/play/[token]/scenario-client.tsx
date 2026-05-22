@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState, useTransition } from "react";
 
 import { API_BASE_URL } from "@/lib/api";
@@ -12,6 +13,9 @@ type ScenarioStep = {
     options?: string[] | null;
     context_title?: string | null;
     context_items?: string[] | null;
+    replay_scenario_id?: string | null;
+    replay_index?: number | null;
+    source_context_step_id?: string | null;
 };
 
 type SessionState = {
@@ -23,13 +27,24 @@ type SessionState = {
     steps: ScenarioStep[];
     completed_step_ids: string[];
     event_count: number;
+    adaptive_question_count: number;
+    max_adaptive_questions: number;
+    replay_context_count: number;
+    replay_scenario_count: number;
+    max_replay_scenarios: number;
+    twin_responses_per_replay: number;
+    scenario_generation_status?: string | null;
+    scenario_generation_message?: string | null;
 };
 
 export function ScenarioClient({ token, initialState }: { token: string; initialState: SessionState }) {
     const [state, setState] = useState(initialState);
-    const [selected, setSelected] = useState("");
+    const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
     const [text, setText] = useState("");
     const [ranked, setRanked] = useState<string[]>([]);
+    const [rejected, setRejected] = useState<string[]>([]);
+    const [correctionText, setCorrectionText] = useState("");
+    const [cvFile, setCvFile] = useState<File | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [isPending, startTransition] = useTransition();
 
@@ -38,12 +53,19 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
         [state.current_step, state.steps],
     );
 
-    const progress = Math.round((state.completed_step_ids.length / state.steps.length) * 100);
+    const maxReplayScenarios = state.max_replay_scenarios ?? 2;
+    const progressMax = state.max_adaptive_questions + maxReplayScenarios;
+    const progressValue = Math.min(state.adaptive_question_count, state.max_adaptive_questions) + Math.min(state.replay_scenario_count ?? 0, maxReplayScenarios);
+    const progressPercent = Math.round((progressValue / progressMax) * 100);
+    const isChoiceStep = currentStep?.type === "triad" || currentStep?.type === "duel";
 
     function resetInputs() {
-        setSelected("");
+        setSelectedIndex(null);
         setText("");
         setRanked([]);
+        setRejected([]);
+        setCorrectionText("");
+        setCvFile(null);
     }
 
     async function refreshState(sessionId = state.session_id) {
@@ -53,19 +75,59 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
     }
 
     function buildAnswer(step: ScenarioStep) {
-        if (step.type === "intro") return { acknowledged: true };
-        if (step.type === "triad" || step.type === "duel") return { selected_option: selected };
-        if (step.type === "context_flip" || step.type === "correction") return { text };
-        if (step.type === "twin_rank") return { ranked_options: ranked };
-        return { selected_option: selected, text };
+        if (step.type === "onboarding") return { user_profile: text.trim() };
+        if ((step.type === "triad" || step.type === "duel") && selectedIndex !== null) {
+            return {
+                selected_index: selectedIndex,
+                selected_option: step.options?.[selectedIndex] ?? "",
+            };
+        }
+        if (step.type === "context_flip") return { text: text.trim() };
+        if (step.type === "twin_rank") {
+            return {
+                ranked_options: ranked,
+                rejected_options: rejected,
+                correction_text: correctionText.trim(),
+            };
+        }
+        return {};
     }
 
     function canSubmit(step: ScenarioStep) {
-        if (step.type === "intro") return true;
-        if (step.type === "triad" || step.type === "duel") return Boolean(selected);
-        if (step.type === "context_flip" || step.type === "correction") return text.trim().length > 0;
+        if (step.type === "onboarding") return Boolean(cvFile) || text.trim().length >= 2;
+        if (step.type === "triad" || step.type === "duel") return selectedIndex !== null;
+        if (step.type === "context_flip") return text.trim().length >= 1;
         if (step.type === "twin_rank") return ranked.length === (step.options?.length ?? 0);
         return true;
+    }
+
+    function toggleRank(option: string) {
+        setRanked((current) => current.includes(option) ? current.filter((item) => item !== option) : [...current, option]);
+    }
+
+    function toggleRejected(option: string) {
+        setRejected((current) => current.includes(option) ? current.filter((item) => item !== option) : [...current, option]);
+    }
+
+    function stepLabel(step: ScenarioStep) {
+        if (step.type === "onboarding") return "Profile setup";
+        if (step.type === "context_flip") return `Replay ${step.replay_index ?? (state.replay_context_count + 1)} of ${maxReplayScenarios}`;
+        if (step.type === "twin_rank") return `Replay ${step.replay_index ?? (state.replay_scenario_count + 1)} response ranking`;
+        return `MCQ ${state.adaptive_question_count + 1} of up to ${state.max_adaptive_questions}`;
+    }
+
+    async function submitCvProfile() {
+        if (!cvFile) return;
+        const formData = new FormData();
+        formData.append("token", token);
+        formData.append("file", cvFile);
+
+        const response = await fetch(`${API_BASE_URL}/api/sessions/${state.session_id}/profile/cv`, {
+            method: "POST",
+            body: formData,
+            cache: "no-store",
+        });
+        if (!response.ok) throw new Error(await response.text());
     }
 
     function submitStep() {
@@ -73,46 +135,28 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
         setError(null);
         startTransition(async () => {
             try {
-                const response = await fetch(`${API_BASE_URL}/api/sessions/${state.session_id}/answer`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        token,
-                        step_id: currentStep.id,
-                        step_type: currentStep.type,
-                        answer: buildAnswer(currentStep),
-                    }),
-                    cache: "no-store",
-                });
-                if (!response.ok) throw new Error(await response.text());
+                if (currentStep.type === "onboarding" && cvFile) {
+                    await submitCvProfile();
+                } else {
+                    const response = await fetch(`${API_BASE_URL}/api/sessions/${state.session_id}/answer`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            token,
+                            step_id: currentStep.id,
+                            step_type: currentStep.type,
+                            answer: buildAnswer(currentStep),
+                        }),
+                        cache: "no-store",
+                    });
+                    if (!response.ok) throw new Error(await response.text());
+                }
                 resetInputs();
                 await refreshState();
             } catch (submitError) {
                 setError(submitError instanceof Error ? submitError.message : "Unable to save answer.");
             }
         });
-    }
-
-    function completeScenario() {
-        setError(null);
-        startTransition(async () => {
-            try {
-                const response = await fetch(`${API_BASE_URL}/api/sessions/${state.session_id}/complete`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ token }),
-                    cache: "no-store",
-                });
-                if (!response.ok) throw new Error(await response.text());
-                setState(await response.json());
-            } catch (completeError) {
-                setError(completeError instanceof Error ? completeError.message : "Unable to complete scenario.");
-            }
-        });
-    }
-
-    function toggleRank(option: string) {
-        setRanked((current) => current.includes(option) ? current.filter((item) => item !== option) : [...current, option]);
     }
 
     if (state.current_step === "complete" || state.session_status === "completed") {
@@ -122,6 +166,7 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
                 <h2>Your behavioral mirror session is complete.</h2>
                 <p className="muted">Your answers were saved as raw behavioral evidence for this token.</p>
                 <div className="status"><span className="dot" />{state.event_count} events captured</div>
+                <Link className="button" href={`/train/${encodeURIComponent(token)}`}>Continue to Initialization Chat</Link>
             </section>
         );
     }
@@ -133,10 +178,13 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
     return (
         <section className="panel stack">
             <div className="row">
-                <span className="eyebrow">Step {state.completed_step_ids.length + 1} of {state.steps.length}</span>
-                <span className="status"><span className="dot" />{progress}%</span>
+                <span className="eyebrow">{stepLabel(currentStep)}</span>
+                <span className="status">
+                    <span className="dot" />
+                    MCQ {state.adaptive_question_count}/{state.max_adaptive_questions} | Replay {state.replay_scenario_count}/{maxReplayScenarios} | {progressPercent}%
+                </span>
             </div>
-            <progress value={state.completed_step_ids.length} max={state.steps.length} />
+            <progress value={progressValue} max={progressMax} />
             <h2>{currentStep.title}</h2>
             <p className="muted">{currentStep.prompt}</p>
 
@@ -151,14 +199,34 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
                 </div>
             )}
 
-            {(currentStep.type === "triad" || currentStep.type === "duel") && currentStep.options && (
+            {currentStep.type === "onboarding" && (
                 <div className="stack">
-                    {currentStep.options.map((option) => (
+                    <textarea
+                        value={text}
+                        onChange={(event) => setText(event.target.value)}
+                        placeholder="Background, hobbies, work, current project..."
+                        disabled={Boolean(cvFile)}
+                    />
+                    <div className="context-panel stack">
+                        <strong>Upload a CV instead</strong>
+                        <input
+                            accept=".pdf,application/pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,text/markdown,text/plain"
+                            onChange={(event) => setCvFile(event.target.files?.[0] ?? null)}
+                            type="file"
+                        />
+                        {cvFile && <p className="muted">Selected: {cvFile.name}</p>}
+                    </div>
+                </div>
+            )}
+
+            {isChoiceStep && currentStep.options && (
+                <div className="stack">
+                    {currentStep.options.map((option, index) => (
                         <button
-                            className={`choice ${selected === option ? "selected" : ""}`}
-                            key={option}
+                            className={`choice ${selectedIndex === index ? "selected" : ""}`}
+                            key={`${currentStep.id}-${index}`}
                             type="button"
-                            onClick={() => setSelected(option)}
+                            onClick={() => setSelectedIndex(index)}
                         >
                             {option}
                         </button>
@@ -166,32 +234,53 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
                 </div>
             )}
 
-            {(currentStep.type === "context_flip" || currentStep.type === "correction") && (
-                <textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="Write your reasoning here..." />
+            {currentStep.type === "context_flip" && (
+                <textarea
+                    value={text}
+                    onChange={(event) => setText(event.target.value)}
+                    placeholder="Write what changes, what stays the same, and what would decide it..."
+                />
             )}
 
             {currentStep.type === "twin_rank" && currentStep.options && (
                 <div className="stack">
-                    <p className="muted">Click options in order from closest to least close.</p>
                     {currentStep.options.map((option) => (
-                        <button className={`choice ${ranked.includes(option) ? "selected" : ""}`} key={option} type="button" onClick={() => toggleRank(option)}>
-                            {ranked.includes(option) ? `${ranked.indexOf(option) + 1}. ` : ""}{option}
-                        </button>
+                        <div className="rank-option" key={option}>
+                            <button
+                                className={`choice ${ranked.includes(option) ? "selected" : ""}`}
+                                type="button"
+                                onClick={() => toggleRank(option)}
+                            >
+                                {ranked.includes(option) ? `${ranked.indexOf(option) + 1}. ` : ""}{option}
+                            </button>
+                            <button
+                                className={`button secondary reject-button ${rejected.includes(option) ? "selected" : ""}`}
+                                type="button"
+                                onClick={() => toggleRejected(option)}
+                            >
+                                {rejected.includes(option) ? "Rejected" : "Reject"}
+                            </button>
+                        </div>
                     ))}
+                    <textarea
+                        value={correctionText}
+                        onChange={(event) => setCorrectionText(event.target.value)}
+                        placeholder="Optional correction: what did these responses miss?"
+                    />
                 </div>
+            )}
+
+            {state.scenario_generation_status === "fallback" && (
+                <p className="muted">Using deterministic adaptive prompts for this step.</p>
             )}
 
             {error && <p className="error">{error}</p>}
 
-            {state.completed_step_ids.length >= state.steps.length ? (
-                <button className="button" type="button" onClick={completeScenario} disabled={isPending}>
-                    Complete Scenario
-                </button>
-            ) : (
-                <button className="button" type="button" onClick={submitStep} disabled={isPending || !canSubmit(currentStep)}>
-                    {isPending ? "Saving..." : currentStep.type === "intro" ? "Begin" : "Save and Continue"}
-                </button>
-            )}
+            <button className="button" type="button" onClick={submitStep} disabled={isPending || !canSubmit(currentStep)}>
+                {isPending
+                    ? currentStep.type === "onboarding" && cvFile ? "Processing CV..." : currentStep.type === "onboarding" ? "Generating..." : "Saving and generating..."
+                    : currentStep.type === "onboarding" ? "Start" : "Save and Continue"}
+            </button>
         </section>
     );
 }

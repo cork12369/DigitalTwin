@@ -1,11 +1,13 @@
 import Link from "next/link";
 
 import { type AnalysisRun, type ErrorReport, type HealthResponse, type RawEvent } from "@/lib/api";
-import { API_SERVER_BASE_URL } from "@/lib/api-server";
+import { API_SERVER_BASE_URL, adminApiFetch } from "@/lib/api-server";
 
 async function safeFetch<T>(path: string, fallback: T): Promise<T> {
     try {
-        const response = await fetch(`${API_SERVER_BASE_URL}${path}`, { cache: "no-store" });
+        const response = path.startsWith("/api/admin")
+            ? await adminApiFetch(path, { cache: "no-store" })
+            : await fetch(`${API_SERVER_BASE_URL}${path}`, { cache: "no-store" });
         if (!response.ok) return fallback;
         return response.json();
     } catch {
@@ -56,6 +58,7 @@ export default async function AdminDashboardPage() {
                     </p>
                     <div className="row" style={{ justifyContent: "flex-start" }}>
                         <Link className="button" href="/admin/tokens">Generate Token</Link>
+                        <Link className="button secondary" href="/admin/logout">Lock Admin</Link>
                         <Link className="button secondary" href="/">Back Home</Link>
                     </div>
                 </section>

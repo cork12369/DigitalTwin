@@ -6,13 +6,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str = "sqlite:///./digital_twin.db"
     app_secret_key: str = "change-me-in-production"
+    admin_api_secret: str = "change-me-admin-api-secret"
     cors_origins: str = "http://localhost:3000"
     public_web_url: str = "http://localhost:3000"
     openrouter_api_key: str = ""
     openrouter_model: str = "openai/gpt-4o-mini"
+    openrouter_utility_model: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_site_url: str = "http://localhost:3000"
     openrouter_app_name: str = "Digital Twin Prototype"
+    openviking_base_url: str = ""
+    openviking_api_key: str = ""
+    openviking_timeout_seconds: float = 20.0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -23,6 +28,10 @@ class Settings(BaseSettings):
     @property
     def has_openrouter_key(self) -> bool:
         return bool(self.openrouter_api_key.strip())
+
+    @property
+    def has_openviking_config(self) -> bool:
+        return bool(self.openviking_base_url.strip())
 
 
 @lru_cache

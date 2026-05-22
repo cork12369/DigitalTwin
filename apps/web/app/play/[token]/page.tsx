@@ -46,8 +46,8 @@ export default async function PlayPage({ params }: PageProps) {
                 </section>
 
                 <section className="panel stack">
-                    <h2>Questionnaire / Game Scenario</h2>
-                    <p className="muted">Run through triads, trade-off duels, context flips, ranking, and correction capture.</p>
+                    <h2>Adaptive Scenario</h2>
+                    <p className="muted">Answer each prompt as it appears. The next one is tailored from your previous answer.</p>
                     {validation.valid && <code>Session ID: {validation.session_id}</code>}
                 </section>
 

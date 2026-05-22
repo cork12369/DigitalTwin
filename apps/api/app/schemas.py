@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from app.models import AnalysisStatus, ErrorCategory, EvidenceType, SessionStatus, TokenStatus, WorkflowStatus
+from app.models import AnalysisStatus, ErrorCategory, EvidenceType, HarnessStatus, SessionStatus, TokenStatus, WorkflowStatus
 
 
 class TokenCreateRequest(BaseModel):
@@ -14,11 +14,13 @@ class TokenResponse(BaseModel):
     id: str
     label: str
     status: TokenStatus
+    auth_key: str | None = None
     created_at: datetime
     expires_at: datetime | None
     first_used_at: datetime | None
     last_seen_at: datetime | None
     completed_at: datetime | None
+    initialization_status: str = "not_started"
 
     model_config = {"from_attributes": True}
 
@@ -90,6 +92,14 @@ class WorkflowRunResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class OpenVikingStatusResponse(BaseModel):
+    configured: bool
+    status: str
+    base_url: str | None = None
+    message: str
+    detail: dict = Field(default_factory=dict)
+
+
 class ErrorReportResponse(BaseModel):
     id: str
     token_id: str | None
@@ -111,6 +121,9 @@ class ScenarioStep(BaseModel):
     options: list[str] | None = None
     context_title: str | None = None
     context_items: list[str] | None = None
+    replay_scenario_id: str | None = None
+    replay_index: int | None = None
+    source_context_step_id: str | None = None
 
 
 class SessionStartRequest(BaseModel):
@@ -126,6 +139,14 @@ class SessionStateResponse(BaseModel):
     steps: list[ScenarioStep]
     completed_step_ids: list[str]
     event_count: int
+    adaptive_question_count: int = 0
+    max_adaptive_questions: int = 8
+    replay_context_count: int = 0
+    replay_scenario_count: int = 0
+    max_replay_scenarios: int = 2
+    twin_responses_per_replay: int = 3
+    scenario_generation_status: str | None = None
+    scenario_generation_message: str | None = None
 
 
 class StepAnswerRequest(BaseModel):
@@ -153,6 +174,7 @@ class AdminTokenSummaryResponse(TokenResponse):
     event_count: int = 0
     latest_analysis_status: AnalysisStatus | None = None
     evidence_count: int = 0
+    invite_url: str | None = None
 
 
 class AnalysisArtifactResponse(BaseModel):
@@ -207,9 +229,190 @@ class AnalysisRunDetailResponse(AnalysisRunResponse):
     evidence: list[BehavioralEvidenceResponse] = []
 
 
+class TwinHarnessScoreResponse(BaseModel):
+    id: str
+    harness_run_id: str
+    case_id: str
+    token_id: str
+    source_type: str
+    source_id: str | None
+    source_label: str | None
+    metric_type: str
+    base_logprob: float
+    conditioned_logprob: float
+    lift: float
+    information_gain_bits: float
+    kl_divergence: float
+    verdict: str
+    distribution_base: dict
+    distribution_conditioned: dict
+    metadata_json: dict
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TwinHarnessCaseResponse(BaseModel):
+    id: str
+    harness_run_id: str
+    token_id: str
+    target_event_id: str | None
+    target_step_id: str | None
+    target_step_type: str
+    replay_scenario_id: str | None
+    human_target_label: str
+    human_target_text: str
+    candidate_actions: list[dict]
+    baseline_prompt: str
+    metadata_json: dict
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TwinHarnessRunResponse(BaseModel):
+    id: str
+    token_id: str
+    status: HarnessStatus
+    trigger_reason: str
+    model_name: str
+    prompt_version: str
+    input_summary: str | None
+    output_summary: str | None
+    error_summary: str | None
+    aggregate_metrics: dict
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TwinHarnessRunDetailResponse(TwinHarnessRunResponse):
+    cases: list[TwinHarnessCaseResponse] = []
+    scores: list[TwinHarnessScoreResponse] = []
+
+
+class OpenVikingTokenStateResponse(BaseModel):
+    token_id: str
+    root_uri: str
+    status: OpenVikingStatusResponse
+    latest_sync_run: WorkflowRunResponse | None = None
+    latest_test_run: TwinHarnessRunResponse | None = None
+    mirrored_source_count: int = 0
+    last_error: str | None = None
+
+
 class AdminTokenDetailResponse(BaseModel):
     participant: AdminTokenSummaryResponse
     sessions: list[SessionResponse]
     events: list[EventResponse]
     analysis_runs: list[AnalysisRunResponse]
     evidence: list[BehavioralEvidenceResponse]
+    latest_harness_run: TwinHarnessRunResponse | None = None
+
+
+class TrainingStartRequest(BaseModel):
+    token: str = Field(min_length=16)
+
+
+class TrainingChatMessageResponse(BaseModel):
+    id: str
+    role: str
+    content: str
+    message_index: int
+    pair_index: int | None
+    metadata_json: dict
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TrainingStateResponse(BaseModel):
+    token_id: str
+    chat_session_id: str
+    initialization_status: str
+    guide_custom_prompt: str | None = None
+    messages: list[TrainingChatMessageResponse]
+    readiness: dict
+    pair_count: int
+    pair_block_size: int
+    draft_card_count: int
+    latest_compaction_run_id: str | None = None
+    latest_compaction_status: str | None = None
+    compaction_notice: str | None = None
+
+
+class TrainingMessageCreateRequest(BaseModel):
+    token: str = Field(min_length=16)
+    content: str = Field(min_length=1, max_length=5000)
+
+
+class GuideSettingsUpdateRequest(BaseModel):
+    token: str = Field(min_length=16)
+    custom_prompt: str | None = Field(default=None, max_length=1200)
+
+
+class MemoryCardsListRequest(BaseModel):
+    token: str = Field(min_length=16)
+
+
+class MemoryCardPillarLinkResponse(BaseModel):
+    pillar_key: str
+    weight: float
+
+
+class MemoryCardDuplicateSuggestionResponse(BaseModel):
+    id: str
+    candidate_card_id: str
+    matched_card_id: str
+    matched_card_title: str | None = None
+    status: str
+    confidence: str
+    reason: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MemoryCardResponse(BaseModel):
+    id: str
+    title: str
+    body: str
+    status: str
+    priority: str
+    source_quote: str | None
+    pillar_links: list[MemoryCardPillarLinkResponse]
+    duplicate_suggestions: list[MemoryCardDuplicateSuggestionResponse] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MemoryCardsResponse(BaseModel):
+    token_id: str
+    pillars: list[dict]
+    priority_weights: dict
+    readiness: dict
+    cards: list[MemoryCardResponse]
+
+
+class MemoryCardUpdateRequest(BaseModel):
+    token: str = Field(min_length=16)
+    title: str | None = Field(default=None, max_length=180)
+    body: str | None = Field(default=None, max_length=1200)
+    status: str | None = Field(default=None, max_length=40)
+    priority: str | None = Field(default=None, max_length=40)
+    pillar_keys: list[str] | None = None
+
+
+class MemoryCardDeleteRequest(BaseModel):
+    token: str = Field(min_length=16)
+
+
+class TrainingDiagnosticsResponse(BaseModel):
+    token_id: str
+    readiness: dict
+    graph: dict
+    latest_snapshot: dict | None = None
