@@ -8,7 +8,7 @@ type PageProps = {
 
 export default async function AdminLoginPage({ searchParams }: PageProps) {
     const params = await searchParams;
-    const next = params?.next?.startsWith("/admin") ? params.next : "/admin";
+    const next = safeNextPath(params?.next ?? "/admin");
 
     return (
         <main className="page">
@@ -29,4 +29,14 @@ export default async function AdminLoginPage({ searchParams }: PageProps) {
             </div>
         </main>
     );
+}
+
+function safeNextPath(value: string) {
+    if (!value.startsWith("/admin") || value.startsWith("/admin/login")) {
+        return "/admin";
+    }
+    if (/^\/admin\/tokens\/[^/]+\/(analyze|delete|reset|revoke)$/.test(value)) {
+        return "/admin/tokens";
+    }
+    return value;
 }

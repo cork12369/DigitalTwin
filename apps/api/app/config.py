@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     public_web_url: str = "http://localhost:3000"
     openrouter_api_key: str = ""
     openrouter_model: str = "openai/gpt-4o-mini"
+    openrouter_utility_model: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_site_url: str = "http://localhost:3000"
     openrouter_app_name: str = "Digital Twin Prototype"

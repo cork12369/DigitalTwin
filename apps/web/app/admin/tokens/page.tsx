@@ -7,7 +7,7 @@ import { CreateTokenForm } from "./create-token-form";
 import { TokenActions } from "./token-actions";
 
 type PageProps = {
-    searchParams?: Promise<{ status?: string }>;
+    searchParams?: Promise<{ actionError?: string; status?: string }>;
 };
 
 const STATUS_FILTERS = [
@@ -46,6 +46,7 @@ export default async function TokenAdminPage({ searchParams }: PageProps) {
     const params = await searchParams;
     const tokens = await getTokens();
     const requestedStatus = params?.status ?? "all";
+    const actionError = params?.actionError;
     const activeStatus = STATUS_FILTERS.some((filter) => filter.value === requestedStatus)
         ? requestedStatus
         : "all";
@@ -78,6 +79,8 @@ export default async function TokenAdminPage({ searchParams }: PageProps) {
                     <p className="muted">Generate a personal invite link for a participant.</p>
                     <CreateTokenForm />
                 </section>
+
+                {actionError && <section className="panel error">{actionError}</section>}
 
                 <section className="panel stack">
                     <div className="row">

@@ -1,21 +1,26 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import ParticipantSession, ParticipantToken, RawEvent, SessionStatus, TokenStatus
 from app.scenario import (
     MAX_ADAPTIVE_QUESTIONS,
+    MIN_REPLAY_START_QUESTIONS,
     ONBOARDING_STEP,
+    REPLAY_SCENARIO_COUNT,
+    TWIN_RESPONSES_PER_REPLAY,
     event_type_for_step,
     fallback_step,
     get_token_step,
     initial_adaptive_state,
     scenario_steps_for_token,
+    should_complete,
 )
 from app.schemas import (
     EventCreateRequest,
@@ -29,8 +34,12 @@ from app.schemas import (
 from app.services.adaptive_scenario_service import (
     AdaptiveGenerationResult,
     generate_adaptive_step,
+    generate_context_flip_step,
+    generate_twin_rank_step,
     initialize_generation_metadata,
+    record_adaptive_choice_signal,
 )
+from app.services.harness_service import queue_harness_run, run_harness_job
 from app.services.profile_service import ProfileIngestionResult, build_manual_profile, ingest_cv_pdf
 from app.services.token_service import find_by_raw_token, get_or_create_session, validate_and_touch_token
 
@@ -118,7 +127,12 @@ async def upload_cv_profile(
 
 
 @router.post("/{session_id}/answer", response_model=StepAnswerResponse)
-def answer_step(session_id: str, payload: StepAnswerRequest, db: Session = Depends(get_db)) -> StepAnswerResponse:
+def answer_step(
+    session_id: str,
+    payload: StepAnswerRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> StepAnswerResponse:
     participant = find_by_raw_token(db, payload.token)
     if participant is None or participant.status in {TokenStatus.revoked, TokenStatus.expired}:
         raise HTTPException(status_code=400, detail="Token is invalid or unavailable")
@@ -140,7 +154,8 @@ def answer_step(session_id: str, payload: StepAnswerRequest, db: Session = Depen
     if step["type"] == "onboarding":
         event = _answer_onboarding(db, participant, session, step, payload.answer)
     else:
-        event = _answer_adaptive_question(db, participant, session, step, payload.answer)
+        event = _answer_generated_step(db, participant, session, step, payload.answer)
+    _queue_completed_harness(db, participant, session, background_tasks, "scenario_completion")
 
     return StepAnswerResponse(
         event=event,
@@ -152,7 +167,12 @@ def answer_step(session_id: str, payload: StepAnswerRequest, db: Session = Depen
 
 
 @router.post("/{session_id}/complete", response_model=SessionStateResponse)
-def complete_session(session_id: str, payload: SessionCompleteRequest, db: Session = Depends(get_db)) -> SessionStateResponse:
+def complete_session(
+    session_id: str,
+    payload: SessionCompleteRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> SessionStateResponse:
     participant = find_by_raw_token(db, payload.token)
     if participant is None or participant.status in {TokenStatus.revoked, TokenStatus.expired}:
         raise HTTPException(status_code=400, detail="Token is invalid or unavailable")
@@ -163,11 +183,28 @@ def complete_session(session_id: str, payload: SessionCompleteRequest, db: Sessi
     if session.current_step != "complete" and session.status != SessionStatus.completed:
         raise HTTPException(status_code=400, detail="Adaptive scenario is not complete yet")
 
-    if session.status != SessionStatus.completed:
+    completed_now = session.status != SessionStatus.completed
+    if completed_now:
         _mark_completed(db, participant, session, _session_events(db, session.id))
         db.commit()
         db.refresh(session)
+    if completed_now:
+        _queue_completed_harness(db, participant, session, background_tasks, "scenario_completion")
     return _session_state(db, session)
+
+
+def _queue_completed_harness(
+    db: Session,
+    participant: ParticipantToken,
+    session: ParticipantSession,
+    background_tasks: BackgroundTasks,
+    trigger_reason: str,
+) -> None:
+    if session.status != SessionStatus.completed:
+        return
+    run = queue_harness_run(db, participant, trigger_reason)
+    if run is not None:
+        background_tasks.add_task(run_harness_job, run.id)
 
 
 def _answer_onboarding(
@@ -213,35 +250,30 @@ def _apply_profile_ingestion(
     db.commit()
     db.refresh(event)
 
-    result = generate_adaptive_step(
-        participant=participant,
-        events=_session_events(db, session.id),
-        last_step=None,
-        last_answer=None,
-        adaptive_answer_count=0,
-    )
-    _apply_generation_result(participant, result)
-    if result.next_step is None:
-        next_step = fallback_step(1)
-        _append_adaptive_step(participant, next_step)
-        session.current_step = next_step["id"]
-    else:
-        _append_adaptive_step(participant, result.next_step)
-        session.current_step = result.next_step["id"]
+    _advance_session(db, participant, session, _session_events(db, session.id))
     db.commit()
     db.refresh(event)
     db.refresh(session)
     return event
 
 
-def _answer_adaptive_question(
+def _answer_generated_step(
     db: Session,
     participant: ParticipantToken,
     session: ParticipantSession,
     step: dict[str, Any],
     answer: dict[str, Any],
 ) -> RawEvent:
-    normalized_answer = _choice_answer(step, answer)
+    step_type = str(step.get("type"))
+    if step_type in {"triad", "duel"}:
+        normalized_answer = _choice_answer(step, answer)
+    elif step_type == "context_flip":
+        normalized_answer = _text_answer(step, answer)
+    elif step_type == "twin_rank":
+        normalized_answer = _twin_rank_answer(step, answer)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported generated step type")
+
     event = _create_step_event(db, participant, session, step, normalized_answer)
     participant.status = TokenStatus.in_progress
     session.status = SessionStatus.in_progress
@@ -249,27 +281,151 @@ def _answer_adaptive_question(
     db.refresh(event)
 
     events = _session_events(db, session.id)
-    adaptive_answer_count = _adaptive_answer_count(events)
-    result = generate_adaptive_step(
-        participant=participant,
-        events=events,
-        last_step=step,
-        last_answer=normalized_answer,
-        adaptive_answer_count=adaptive_answer_count,
-    )
-    _apply_generation_result(participant, result)
+    if step_type in {"triad", "duel"}:
+        _apply_generation_result(
+            participant,
+            record_adaptive_choice_signal(
+                participant=participant,
+                last_step=step,
+                last_answer=normalized_answer,
+                adaptive_answer_count=_adaptive_answer_count(events),
+            ),
+        )
 
-    if result.should_complete:
-        _mark_completed(db, participant, session, events)
-    else:
-        next_step = result.next_step or fallback_step(adaptive_answer_count + 1)
-        _append_adaptive_step(participant, next_step)
-        session.current_step = next_step["id"]
-
+    _advance_session(db, participant, session, events)
     db.commit()
     db.refresh(event)
     db.refresh(session)
     return event
+
+
+def _advance_session(
+    db: Session,
+    participant: ParticipantToken,
+    session: ParticipantSession,
+    events: list[RawEvent],
+) -> None:
+    if _flow_ready_to_complete(participant, events):
+        _mark_completed(db, participant, session, events)
+        return
+
+    next_step = _next_generated_step(participant, events)
+    if next_step is None:
+        _mark_completed(db, participant, session, events)
+        return
+
+    _append_adaptive_step(participant, next_step)
+    session.current_step = next_step["id"]
+
+
+def _next_generated_step(participant: ParticipantToken, events: list[RawEvent]) -> dict[str, Any] | None:
+    pending_context = _pending_context_flip_event(events)
+    if pending_context is not None:
+        replay_index = _replay_index_from_event(pending_context) or max(1, _context_flip_answer_count(events))
+        result = generate_twin_rank_step(
+            participant=participant,
+            events=events,
+            context_event=pending_context,
+            replay_index=replay_index,
+        )
+        _apply_generation_result(participant, result)
+        return result.next_step
+
+    adaptive_count = _adaptive_answer_count(events)
+    if _should_generate_context_flip(participant, events):
+        replay_index = _context_flip_answer_count(events) + 1
+        result = generate_context_flip_step(
+            participant=participant,
+            events=events,
+            replay_index=replay_index,
+            adaptive_answer_count=adaptive_count,
+        )
+        _apply_generation_result(participant, result)
+        return result.next_step
+
+    result = generate_adaptive_step(
+        participant=participant,
+        events=events,
+        last_step=None,
+        last_answer=None,
+        adaptive_answer_count=adaptive_count,
+    )
+    _apply_generation_result(participant, result)
+    if result.should_complete:
+        if _twin_rank_answer_count(events) >= REPLAY_SCENARIO_COUNT:
+            return None
+        if _context_flip_answer_count(events) < REPLAY_SCENARIO_COUNT and adaptive_count >= MIN_REPLAY_START_QUESTIONS:
+            replay_index = _context_flip_answer_count(events) + 1
+            replay_result = generate_context_flip_step(
+                participant=participant,
+                events=events,
+                replay_index=replay_index,
+                adaptive_answer_count=adaptive_count,
+            )
+            _apply_generation_result(participant, replay_result)
+            return replay_result.next_step
+
+    return result.next_step or fallback_step(adaptive_count + 1)
+
+
+def _flow_ready_to_complete(participant: ParticipantToken, events: list[RawEvent]) -> bool:
+    return (
+        _twin_rank_answer_count(events) >= REPLAY_SCENARIO_COUNT
+        and should_complete(_adaptive_answer_count(events), _state_confidence(participant))
+    )
+
+
+def _should_generate_context_flip(participant: ParticipantToken, events: list[RawEvent]) -> bool:
+    adaptive_count = _adaptive_answer_count(events)
+    context_count = _context_flip_answer_count(events)
+    if context_count >= REPLAY_SCENARIO_COUNT or _pending_context_flip_event(events) is not None:
+        return False
+    if adaptive_count < MIN_REPLAY_START_QUESTIONS:
+        return False
+    if adaptive_count >= MAX_ADAPTIVE_QUESTIONS:
+        return True
+    if should_complete(adaptive_count, _state_confidence(participant)):
+        return True
+    return _stable_replay_pick(participant, events)
+
+
+def _stable_replay_pick(participant: ParticipantToken, events: list[RawEvent]) -> bool:
+    seed = ":".join(
+        [
+            participant.id,
+            str(_adaptive_answer_count(events)),
+            str(_context_flip_answer_count(events)),
+            str(_twin_rank_answer_count(events)),
+            str(len(events)),
+        ]
+    )
+    value = int(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8], 16) % 100
+    return value < 40
+
+
+def _pending_context_flip_event(events: list[RawEvent]) -> RawEvent | None:
+    ranked_replay_ids = {
+        replay_id
+        for event in events
+        if (event.payload if isinstance(event.payload, dict) else {}).get("step_type") == "twin_rank"
+        for replay_id in [_replay_id_from_event(event)]
+        if replay_id
+    }
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if payload.get("step_type") == "context_flip":
+            replay_id = _replay_id_from_event(event)
+            if replay_id and replay_id not in ranked_replay_ids:
+                return event
+    return None
+
+
+def _state_confidence(participant: ParticipantToken) -> float:
+    state = participant.adaptive_scenario_state if isinstance(participant.adaptive_scenario_state, dict) else {}
+    try:
+        return max(0.0, min(1.0, float(state.get("confidence", 0.0))))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _create_step_event(
@@ -279,16 +435,20 @@ def _create_step_event(
     step: dict[str, Any],
     answer: dict[str, Any],
 ) -> RawEvent:
+    event_payload = {
+        "step_id": step["id"],
+        "step_type": step["type"],
+        "answer": answer,
+        "step_snapshot": step,
+    }
+    if step.get("replay_scenario_id"):
+        event_payload["replay_scenario_id"] = step["replay_scenario_id"]
+
     event = RawEvent(
         token_id=participant.id,
         session_id=session.id,
         event_type=event_type_for_step(step["type"]),
-        payload={
-            "step_id": step["id"],
-            "step_type": step["type"],
-            "answer": answer,
-            "step_snapshot": step,
-        },
+        payload=event_payload,
     )
     db.add(event)
     return event
@@ -332,26 +492,7 @@ def _ensure_session_current_step(db: Session, participant: ParticipantToken, ses
             session.current_step = str(step["id"])
             return
 
-    adaptive_count = _adaptive_answer_count(events)
-    if adaptive_count >= MAX_ADAPTIVE_QUESTIONS:
-        _mark_completed(db, participant, session, events)
-        return
-
-    result = generate_adaptive_step(
-        participant=participant,
-        events=events,
-        last_step=None,
-        last_answer=None,
-        adaptive_answer_count=adaptive_count,
-    )
-    _apply_generation_result(participant, result)
-    if result.should_complete:
-        _mark_completed(db, participant, session, events)
-        return
-
-    next_step = result.next_step or fallback_step(adaptive_count + 1)
-    _append_adaptive_step(participant, next_step)
-    session.current_step = next_step["id"]
+    _advance_session(db, participant, session, events)
 
 
 def _session_state(db: Session, session: ParticipantSession) -> SessionStateResponse:
@@ -369,6 +510,10 @@ def _session_state(db: Session, session: ParticipantSession) -> SessionStateResp
         event_count=len(events),
         adaptive_question_count=_adaptive_answer_count(events),
         max_adaptive_questions=MAX_ADAPTIVE_QUESTIONS,
+        replay_context_count=_context_flip_answer_count(events),
+        replay_scenario_count=_twin_rank_answer_count(events),
+        max_replay_scenarios=REPLAY_SCENARIO_COUNT,
+        twin_responses_per_replay=TWIN_RESPONSES_PER_REPLAY,
         scenario_generation_status=metadata.get("status"),
         scenario_generation_message=metadata.get("reason"),
     )
@@ -392,6 +537,8 @@ def _mark_completed(
                     "step_id": "complete",
                     "completed_step_ids": completed_step_ids,
                     "adaptive_question_count": _adaptive_answer_count(events),
+                    "replay_context_count": _context_flip_answer_count(events),
+                    "replay_scenario_count": _twin_rank_answer_count(events),
                     "confidence": (participant.adaptive_scenario_state or {}).get("confidence"),
                 },
             )
@@ -399,6 +546,7 @@ def _mark_completed(
     session.status = SessionStatus.completed
     session.current_step = "complete"
     participant.status = TokenStatus.completed
+    participant.initialization_status = "ready_to_train"
     participant.completed_at = datetime.now(timezone.utc)
 
 
@@ -451,6 +599,58 @@ def _choice_answer(step: dict[str, Any], answer: dict[str, Any]) -> dict[str, An
     }
 
 
+def _text_answer(step: dict[str, Any], answer: dict[str, Any]) -> dict[str, Any]:
+    value = answer.get("text")
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail="text is required")
+    text = value.strip()
+    if len(text) < 1:
+        raise HTTPException(status_code=400, detail="text is required")
+    if len(text) > 2000:
+        raise HTTPException(status_code=400, detail="text must be 2000 characters or fewer")
+    normalized: dict[str, Any] = {"text": text}
+    if step.get("replay_scenario_id"):
+        normalized["replay_scenario_id"] = step["replay_scenario_id"]
+    return normalized
+
+
+def _twin_rank_answer(step: dict[str, Any], answer: dict[str, Any]) -> dict[str, Any]:
+    options = step.get("options") or []
+    if len(options) != TWIN_RESPONSES_PER_REPLAY:
+        raise HTTPException(status_code=400, detail="twin_rank steps require exactly three options")
+
+    ranked_options = answer.get("ranked_options")
+    if not isinstance(ranked_options, list) or len(ranked_options) != len(options):
+        raise HTTPException(status_code=400, detail="ranked_options must rank all twin responses")
+    if any(not isinstance(option, str) for option in ranked_options):
+        raise HTTPException(status_code=400, detail="ranked_options must contain response text")
+    if set(ranked_options) != set(options) or len(set(ranked_options)) != len(options):
+        raise HTTPException(status_code=400, detail="ranked_options must match each available response exactly once")
+
+    rejected_options = answer.get("rejected_options", [])
+    if rejected_options is None:
+        rejected_options = []
+    if not isinstance(rejected_options, list) or any(not isinstance(option, str) for option in rejected_options):
+        raise HTTPException(status_code=400, detail="rejected_options must be a list of response text")
+    rejected = [option for option in rejected_options if option in options]
+
+    correction_value = answer.get("correction_text") or answer.get("correction") or ""
+    if not isinstance(correction_value, str):
+        raise HTTPException(status_code=400, detail="correction_text must be text")
+    correction_text = correction_value.strip()
+    if len(correction_text) > 2000:
+        raise HTTPException(status_code=400, detail="correction_text must be 2000 characters or fewer")
+
+    normalized: dict[str, Any] = {
+        "ranked_options": ranked_options,
+        "rejected_options": rejected,
+        "correction_text": correction_text,
+    }
+    if step.get("replay_scenario_id"):
+        normalized["replay_scenario_id"] = step["replay_scenario_id"]
+    return normalized
+
+
 def _session_events(db: Session, session_id: str) -> list[RawEvent]:
     return db.query(RawEvent).filter(RawEvent.session_id == session_id).order_by(RawEvent.created_at.asc()).all()
 
@@ -477,6 +677,51 @@ def _adaptive_answer_count(events: list[RawEvent]) -> int:
         and event.payload.get("step_type") in {"triad", "duel"}
         and str(event.payload.get("step_id", "")).startswith("adaptive_q_")
     )
+
+
+def _context_flip_answer_count(events: list[RawEvent]) -> int:
+    return _step_type_count(events, "context_flip")
+
+
+def _twin_rank_answer_count(events: list[RawEvent]) -> int:
+    return _step_type_count(events, "twin_rank")
+
+
+def _step_type_count(events: list[RawEvent], step_type: str) -> int:
+    return sum(
+        1
+        for event in events
+        if isinstance(event.payload, dict)
+        and event.payload.get("step_type") == step_type
+    )
+
+
+def _replay_id_from_event(event: RawEvent) -> str | None:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    direct = payload.get("replay_scenario_id")
+    if isinstance(direct, str) and direct:
+        return direct
+    answer = payload.get("answer")
+    if isinstance(answer, dict) and isinstance(answer.get("replay_scenario_id"), str):
+        return str(answer["replay_scenario_id"])
+    step = payload.get("step_snapshot")
+    if isinstance(step, dict) and isinstance(step.get("replay_scenario_id"), str):
+        return str(step["replay_scenario_id"])
+    step_id = str(payload.get("step_id", ""))
+    for prefix in ("context_flip_", "twin_rank_"):
+        if step_id.startswith(prefix):
+            return f"replay_{step_id.removeprefix(prefix)}"
+    return None
+
+
+def _replay_index_from_event(event: RawEvent) -> int | None:
+    replay_id = _replay_id_from_event(event)
+    if not replay_id:
+        return None
+    try:
+        return int(replay_id.rsplit("_", 1)[-1])
+    except ValueError:
+        return None
 
 
 def _adaptive_steps(participant: ParticipantToken) -> list[dict[str, Any]]:

@@ -49,6 +49,10 @@ def ensure_participant_token_columns() -> None:
         "adaptive_scenario_steps": "JSON",
         "adaptive_scenario_state": "JSON",
         "scenario_generation_metadata": "JSON",
+        "initialization_status": "VARCHAR(40) NOT NULL DEFAULT 'not_started'",
+        "guide_persona": "JSON",
+        "guide_custom_prompt": "TEXT",
+        "memory_readiness_snapshot": "JSON",
     }
     missing_columns = [
         (name, column_type)

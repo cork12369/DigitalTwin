@@ -3,7 +3,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { ADMIN_AUTH_COOKIE, adminSessionToken, isAdminPassword } from "@/lib/admin-auth";
+import { ADMIN_AUTH_COOKIE, adminCookieSecure, adminSessionToken, isAdminPassword } from "@/lib/admin-auth";
 
 export type AdminLoginState = {
     error?: string;
@@ -18,10 +18,10 @@ export async function loginAdminAction(_prevState: AdminLoginState, formData: Fo
     }
 
     const cookieStore = await cookies();
-    cookieStore.set(ADMIN_AUTH_COOKIE, adminSessionToken(), {
+    cookieStore.set(ADMIN_AUTH_COOKIE, await adminSessionToken(), {
         httpOnly: true,
         sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
+        secure: adminCookieSecure(),
         path: "/",
         maxAge: 60 * 60 * 8,
     });
@@ -32,6 +32,9 @@ export async function loginAdminAction(_prevState: AdminLoginState, formData: Fo
 function safeNextPath(value: string) {
     if (!value.startsWith("/admin") || value.startsWith("/admin/login")) {
         return "/admin";
+    }
+    if (/^\/admin\/tokens\/[^/]+\/(analyze|delete|reset|revoke)$/.test(value)) {
+        return "/admin/tokens";
     }
     return value;
 }

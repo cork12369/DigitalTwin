@@ -60,7 +60,7 @@ def _event_step(event: RawEvent) -> dict[str, Any]:
 
 def _supporting_quote(event: RawEvent) -> str | None:
     answer = event.payload.get("answer", {})
-    return answer.get("text") or answer.get("selected_option") or ", ".join(answer.get("ranked_options", [])) or None
+    return answer.get("text") or answer.get("correction_text") or answer.get("selected_option") or ", ".join(answer.get("ranked_options", [])) or None
 
 
 def _confidence(value: float) -> str:
@@ -115,6 +115,7 @@ def _extract_event(db: Session, run: AnalysisRun, event: RawEvent) -> None:
         "prompt": step.get("prompt"),
         "answer": answer,
         "available_options": step.get("options", []),
+        "replay_scenario_id": event.payload.get("replay_scenario_id"),
         "timestamp": event.created_at.isoformat() if event.created_at else None,
     }
     _create_artifact(db, run, "event_normalization", [event.id], normalized, 1.0)
@@ -173,6 +174,7 @@ def _extract_event(db: Session, run: AnalysisRun, event: RawEvent) -> None:
         payload = {
             "flip_detected": flip_detected,
             "possible_triggers": [term for term in ["public", "team", "only me", "accountability", "risk"] if term in lower],
+            "replay_scenario_id": event.payload.get("replay_scenario_id") or answer.get("replay_scenario_id"),
             "analysis_mode": "mock_reliability_first_open_ended",
             "requires_llm_review": True,
         }
@@ -205,15 +207,36 @@ def _extract_event(db: Session, run: AnalysisRun, event: RawEvent) -> None:
         )
     elif step_type == "twin_rank":
         ranked = answer.get("ranked_options", [])
+        rejected = answer.get("rejected_options", [])
+        correction_text = answer.get("correction_text", "")
+        payload = {
+            "ranked_options": ranked,
+            "rejected_options": rejected,
+            "closest": ranked[0] if ranked else None,
+            "correction_text": correction_text,
+            "replay_scenario_id": event.payload.get("replay_scenario_id") or answer.get("replay_scenario_id"),
+            "requires_llm_review": bool(correction_text),
+        }
         _create_evidence(
             db,
             run,
             event,
             EvidenceType.twin_ranking,
             "Twin ranking captures which preliminary interpretation feels closest to the user.",
-            {"ranked_options": ranked, "closest": ranked[0] if ranked else None},
+            payload,
             0.74,
         )
+        if correction_text:
+            _create_artifact(db, run, "twin_rank_correction_analysis", [event.id], payload, 0.78)
+            _create_evidence(
+                db,
+                run,
+                event,
+                EvidenceType.correction,
+                "Inline twin-response correction captured as a high-weight signal for future interpretation repair.",
+                payload,
+                0.78,
+            )
 
 
 def analyze_token(db: Session, participant: ParticipantToken) -> AnalysisRun:
@@ -264,6 +287,11 @@ def analyze_token(db: Session, participant: ParticipantToken) -> AnalysisRun:
                 "evidence_count": evidence_count,
                 "requires_llm_review": any(
                     event.payload.get("step_type") in {"context_flip", "correction"}
+                    or (
+                        event.payload.get("step_type") == "twin_rank"
+                        and isinstance(event.payload.get("answer"), dict)
+                        and bool(event.payload["answer"].get("correction_text"))
+                    )
                     for event in events
                 ),
             },

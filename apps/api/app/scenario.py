@@ -7,6 +7,9 @@ from typing import Any
 MIN_ADAPTIVE_QUESTIONS = 5
 MAX_ADAPTIVE_QUESTIONS = 8
 COMPLETION_CONFIDENCE = 0.80
+MIN_REPLAY_START_QUESTIONS = 2
+REPLAY_SCENARIO_COUNT = 2
+TWIN_RESPONSES_PER_REPLAY = 3
 
 ONBOARDING_STEP: dict[str, Any] = {
     "id": "onboarding_profile",
@@ -178,6 +181,8 @@ def event_type_for_step(step_type: str) -> str:
         "onboarding": "profile_submitted",
         "triad": "triad_answered",
         "duel": "duel_answered",
+        "context_flip": "context_flip_answered",
+        "twin_rank": "twin_response_ranked",
     }.get(step_type, "scenario_step_answered")
 
 

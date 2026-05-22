@@ -2,20 +2,21 @@ import "server-only";
 
 import crypto from "crypto";
 
+import { computeAdminSessionToken } from "@/lib/admin-session";
+
 export const ADMIN_AUTH_COOKIE = "dt_admin_session";
 
-export function adminSessionToken() {
-    return crypto
-        .createHash("sha256")
-        .update(`${adminPassword()}:${adminSessionSecret()}`)
-        .digest("hex");
-}
+export { computeAdminSessionToken as adminSessionToken };
 
 export function isAdminPassword(value: string) {
     const expected = adminPassword();
     const valueBuffer = Buffer.from(value);
     const expectedBuffer = Buffer.from(expected);
     return valueBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(valueBuffer, expectedBuffer);
+}
+
+export function adminCookieSecure() {
+    return process.env.ADMIN_COOKIE_SECURE === "true";
 }
 
 function adminPassword() {

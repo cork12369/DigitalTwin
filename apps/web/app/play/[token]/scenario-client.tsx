@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState, useTransition } from "react";
 
 import { API_BASE_URL } from "@/lib/api";
@@ -12,6 +13,9 @@ type ScenarioStep = {
     options?: string[] | null;
     context_title?: string | null;
     context_items?: string[] | null;
+    replay_scenario_id?: string | null;
+    replay_index?: number | null;
+    source_context_step_id?: string | null;
 };
 
 type SessionState = {
@@ -25,6 +29,10 @@ type SessionState = {
     event_count: number;
     adaptive_question_count: number;
     max_adaptive_questions: number;
+    replay_context_count: number;
+    replay_scenario_count: number;
+    max_replay_scenarios: number;
+    twin_responses_per_replay: number;
     scenario_generation_status?: string | null;
     scenario_generation_message?: string | null;
 };
@@ -33,6 +41,9 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
     const [state, setState] = useState(initialState);
     const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
     const [text, setText] = useState("");
+    const [ranked, setRanked] = useState<string[]>([]);
+    const [rejected, setRejected] = useState<string[]>([]);
+    const [correctionText, setCorrectionText] = useState("");
     const [cvFile, setCvFile] = useState<File | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [isPending, startTransition] = useTransition();
@@ -42,13 +53,18 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
         [state.current_step, state.steps],
     );
 
-    const progressValue = Math.min(state.adaptive_question_count, state.max_adaptive_questions);
-    const progressPercent = Math.round((progressValue / state.max_adaptive_questions) * 100);
+    const maxReplayScenarios = state.max_replay_scenarios ?? 2;
+    const progressMax = state.max_adaptive_questions + maxReplayScenarios;
+    const progressValue = Math.min(state.adaptive_question_count, state.max_adaptive_questions) + Math.min(state.replay_scenario_count ?? 0, maxReplayScenarios);
+    const progressPercent = Math.round((progressValue / progressMax) * 100);
     const isChoiceStep = currentStep?.type === "triad" || currentStep?.type === "duel";
 
     function resetInputs() {
         setSelectedIndex(null);
         setText("");
+        setRanked([]);
+        setRejected([]);
+        setCorrectionText("");
         setCvFile(null);
     }
 
@@ -66,13 +82,38 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
                 selected_option: step.options?.[selectedIndex] ?? "",
             };
         }
+        if (step.type === "context_flip") return { text: text.trim() };
+        if (step.type === "twin_rank") {
+            return {
+                ranked_options: ranked,
+                rejected_options: rejected,
+                correction_text: correctionText.trim(),
+            };
+        }
         return {};
     }
 
     function canSubmit(step: ScenarioStep) {
         if (step.type === "onboarding") return Boolean(cvFile) || text.trim().length >= 2;
         if (step.type === "triad" || step.type === "duel") return selectedIndex !== null;
+        if (step.type === "context_flip") return text.trim().length >= 1;
+        if (step.type === "twin_rank") return ranked.length === (step.options?.length ?? 0);
         return true;
+    }
+
+    function toggleRank(option: string) {
+        setRanked((current) => current.includes(option) ? current.filter((item) => item !== option) : [...current, option]);
+    }
+
+    function toggleRejected(option: string) {
+        setRejected((current) => current.includes(option) ? current.filter((item) => item !== option) : [...current, option]);
+    }
+
+    function stepLabel(step: ScenarioStep) {
+        if (step.type === "onboarding") return "Profile setup";
+        if (step.type === "context_flip") return `Replay ${step.replay_index ?? (state.replay_context_count + 1)} of ${maxReplayScenarios}`;
+        if (step.type === "twin_rank") return `Replay ${step.replay_index ?? (state.replay_scenario_count + 1)} response ranking`;
+        return `MCQ ${state.adaptive_question_count + 1} of up to ${state.max_adaptive_questions}`;
     }
 
     async function submitCvProfile() {
@@ -125,6 +166,7 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
                 <h2>Your behavioral mirror session is complete.</h2>
                 <p className="muted">Your answers were saved as raw behavioral evidence for this token.</p>
                 <div className="status"><span className="dot" />{state.event_count} events captured</div>
+                <Link className="button" href={`/train/${encodeURIComponent(token)}`}>Continue to Initialization Chat</Link>
             </section>
         );
     }
@@ -136,14 +178,13 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
     return (
         <section className="panel stack">
             <div className="row">
-                <span className="eyebrow">
-                    {currentStep.type === "onboarding"
-                        ? "Profile setup"
-                        : `Question ${state.adaptive_question_count + 1} of up to ${state.max_adaptive_questions}`}
+                <span className="eyebrow">{stepLabel(currentStep)}</span>
+                <span className="status">
+                    <span className="dot" />
+                    MCQ {state.adaptive_question_count}/{state.max_adaptive_questions} | Replay {state.replay_scenario_count}/{maxReplayScenarios} | {progressPercent}%
                 </span>
-                <span className="status"><span className="dot" />{progressPercent}%</span>
             </div>
-            <progress value={progressValue} max={state.max_adaptive_questions} />
+            <progress value={progressValue} max={progressMax} />
             <h2>{currentStep.title}</h2>
             <p className="muted">{currentStep.prompt}</p>
 
@@ -167,9 +208,9 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
                         disabled={Boolean(cvFile)}
                     />
                     <div className="context-panel stack">
-                        <strong>Use a CV instead</strong>
+                        <strong>Upload a CV instead</strong>
                         <input
-                            accept="application/pdf,.pdf"
+                            accept=".pdf,application/pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,text/markdown,text/plain"
                             onChange={(event) => setCvFile(event.target.files?.[0] ?? null)}
                             type="file"
                         />
@@ -190,6 +231,42 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
                             {option}
                         </button>
                     ))}
+                </div>
+            )}
+
+            {currentStep.type === "context_flip" && (
+                <textarea
+                    value={text}
+                    onChange={(event) => setText(event.target.value)}
+                    placeholder="Write what changes, what stays the same, and what would decide it..."
+                />
+            )}
+
+            {currentStep.type === "twin_rank" && currentStep.options && (
+                <div className="stack">
+                    {currentStep.options.map((option) => (
+                        <div className="rank-option" key={option}>
+                            <button
+                                className={`choice ${ranked.includes(option) ? "selected" : ""}`}
+                                type="button"
+                                onClick={() => toggleRank(option)}
+                            >
+                                {ranked.includes(option) ? `${ranked.indexOf(option) + 1}. ` : ""}{option}
+                            </button>
+                            <button
+                                className={`button secondary reject-button ${rejected.includes(option) ? "selected" : ""}`}
+                                type="button"
+                                onClick={() => toggleRejected(option)}
+                            >
+                                {rejected.includes(option) ? "Rejected" : "Reject"}
+                            </button>
+                        </div>
+                    ))}
+                    <textarea
+                        value={correctionText}
+                        onChange={(event) => setCorrectionText(event.target.value)}
+                        placeholder="Optional correction: what did these responses miss?"
+                    />
                 </div>
             )}
 

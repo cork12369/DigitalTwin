@@ -7,6 +7,7 @@ from io import BytesIO
 from typing import Any
 
 import httpx
+from docx import Document as DocxDocument
 from pydantic import BaseModel, Field, ValidationError
 from pypdf import PdfReader
 
@@ -62,16 +63,23 @@ def build_manual_profile(profile_text: str) -> ProfileIngestionResult:
     )
 
 
-def ingest_cv_pdf(filename: str | None, content_type: str | None, file_bytes: bytes) -> ProfileIngestionResult:
-    _validate_pdf_upload(filename, content_type, file_bytes)
-    extracted_text, page_count = _extract_pdf_text(file_bytes)
+def ingest_cv_file(filename: str | None, content_type: str | None, file_bytes: bytes) -> ProfileIngestionResult:
+    file_type = _validate_cv_upload(filename, content_type, file_bytes)
+
+    if file_type == "pdf":
+        extracted_text, page_count = _extract_pdf_text(file_bytes)
+    elif file_type == "docx":
+        extracted_text, page_count = _extract_docx_text(file_bytes)
+    else:  # markdown
+        extracted_text, page_count = _extract_markdown_text(file_bytes)
+
+    source_type = f"cv_{file_type}"
     structured_context = parse_cv_text(extracted_text)
     user_profile = profile_text_from_structured_context(structured_context)
     llm_summary, summary_metadata = summarize_profile_with_llm(structured_context)
 
     metadata = {
         "status": "cv_processed",
-        "pdf_stored": False,
         "source_filename": filename,
         "content_type": content_type,
         "upload_size_bytes": len(file_bytes),
@@ -85,13 +93,17 @@ def ingest_cv_pdf(filename: str | None, content_type: str | None, file_bytes: by
     }
 
     return ProfileIngestionResult(
-        source_type="cv_pdf",
+        source_type=source_type,
         source_filename=filename,
         user_profile=user_profile,
         structured_context=structured_context,
         llm_summary=llm_summary,
         metadata=metadata,
     )
+
+
+# Keep backward-compatible alias
+ingest_cv_pdf = ingest_cv_file
 
 
 def build_model_profile_context(participant: ParticipantToken) -> str:
@@ -167,16 +179,31 @@ def summarize_profile_with_llm(structured_context: dict[str, Any]) -> tuple[dict
     return None, _summary_metadata("fallback", first_error or "summary_generation_failed", attempts=2)
 
 
-def _validate_pdf_upload(filename: str | None, content_type: str | None, file_bytes: bytes) -> None:
+def _validate_cv_upload(filename: str | None, content_type: str | None, file_bytes: bytes) -> str:
+    """Validate upload and return detected file type: 'pdf', 'docx', or 'markdown'."""
     lower_name = (filename or "").lower()
-    is_pdf_name = lower_name.endswith(".pdf")
-    is_pdf_type = content_type in {"application/pdf", "application/x-pdf", "application/octet-stream", None}
-    if not is_pdf_name or not is_pdf_type:
-        raise ValueError("Upload must be a PDF file.")
+
+    if lower_name.endswith(".pdf"):
+        file_type = "pdf"
+    elif lower_name.endswith(".docx"):
+        file_type = "docx"
+    elif lower_name.endswith(".md") or lower_name.endswith(".markdown"):
+        file_type = "markdown"
+    elif content_type in {"application/pdf", "application/x-pdf"}:
+        file_type = "pdf"
+    elif content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        file_type = "docx"
+    elif content_type in {"text/markdown", "text/plain"}:
+        file_type = "markdown"
+    else:
+        raise ValueError("Upload must be a PDF, DOCX, or Markdown file.")
+
     if not file_bytes:
-        raise ValueError("Uploaded PDF is empty.")
+        raise ValueError("Uploaded file is empty.")
     if len(file_bytes) > MAX_CV_UPLOAD_BYTES:
-        raise ValueError("Uploaded PDF must be 5 MB or smaller.")
+        raise ValueError("Uploaded file must be 5 MB or smaller.")
+
+    return file_type
 
 
 def _extract_pdf_text(file_bytes: bytes) -> tuple[str, int]:
@@ -190,6 +217,34 @@ def _extract_pdf_text(file_bytes: bytes) -> tuple[str, int]:
     if len(text) < 40:
         raise ValueError("This PDF does not contain enough extractable text. Paste your profile text instead.")
     return text, len(reader.pages)
+
+
+def _extract_docx_text(file_bytes: bytes) -> tuple[str, int]:
+    try:
+        doc = DocxDocument(BytesIO(file_bytes))
+        paragraphs = [para.text for para in doc.paragraphs if para.text.strip()]
+    except Exception as exc:
+        raise ValueError("Could not read this DOCX file. Try another file or paste profile text instead.") from exc
+
+    text = _clean_text("\n".join(paragraphs))
+    if len(text) < 40:
+        raise ValueError("This DOCX does not contain enough extractable text. Paste your profile text instead.")
+    return text, len(paragraphs)
+
+
+def _extract_markdown_text(file_bytes: bytes) -> tuple[str, int]:
+    try:
+        raw = file_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            raw = file_bytes.decode("utf-8", errors="replace")
+        except Exception as exc:
+            raise ValueError("Could not read this Markdown file. Ensure it is UTF-8 encoded.") from exc
+
+    text = _clean_text(raw)
+    if len(text) < 40:
+        raise ValueError("This Markdown file does not contain enough text. Paste your profile text instead.")
+    return text, text.count("\n") + 1
 
 
 def _call_summary_model(structured_context: dict[str, Any], repair_error: str | None) -> dict[str, Any]:
