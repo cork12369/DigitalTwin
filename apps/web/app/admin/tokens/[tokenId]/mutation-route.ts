@@ -10,7 +10,7 @@ type Params = {
 export async function runTokenMutation(
     request: Request,
     { params }: Params,
-    mutation: "analyze" | "delete" | "reset" | "revoke",
+    mutation: "activate-v2" | "analyze" | "delete" | "preseed-cards" | "reset" | "revoke",
 ) {
     const { tokenId } = await params;
     const method = mutation === "delete" ? "DELETE" : "POST";

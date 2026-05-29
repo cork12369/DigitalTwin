@@ -12,6 +12,13 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_model: str = "openai/gpt-4o-mini"
     openrouter_utility_model: str = ""
+    openrouter_subagent_model: str = "deepseek/deepseek-v4-pro"
+    openrouter_subagent_reasoning_effort: str = "high"
+    openrouter_compaction_model: str = "deepseek/deepseek-v4-pro"
+    openrouter_acp_council_models: str = ""
+    openrouter_acp_council_min_successes: int = 3
+    openrouter_acp_chair_model: str = ""
+    openrouter_acp_council_timeout_seconds: float = 35.0
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_site_url: str = "http://localhost:3000"
     openrouter_app_name: str = "Digital Twin Prototype"

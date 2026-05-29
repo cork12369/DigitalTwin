@@ -261,8 +261,22 @@ def _card_response(db: Session, card: MemoryCard) -> MemoryCardResponse:
         body=card.body,
         status=card.status,
         priority=card.priority,
+        card_type=card.card_type,
+        seed_source=card.seed_source,
+        reinforcement_count=card.reinforcement_count,
+        promoted_at=card.promoted_at,
         source_quote=card.source_quote,
-        pillar_links=[MemoryCardPillarLinkResponse(pillar_key=link.pillar_key, weight=link.weight) for link in card.pillar_links],
+        pillar_links=[
+            MemoryCardPillarLinkResponse(
+                id=link.id,
+                pillar_key=link.pillar_key,
+                weight=link.weight,
+                cumulative_delta_w=link.cumulative_delta_w,
+                update_count=link.update_count,
+                last_updated_at=link.last_updated_at,
+            )
+            for link in card.pillar_links
+        ],
         duplicate_suggestions=[
             MemoryCardDuplicateSuggestionResponse.model_validate(row).model_copy(
                 update={"matched_card_title": matched_titles.get(row.matched_card_id)}

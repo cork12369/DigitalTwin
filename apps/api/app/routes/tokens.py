@@ -7,6 +7,7 @@ from app.dependencies import require_admin_secret
 from app.models import (
     AnalysisRun,
     BehavioralEvidence,
+    ConfigEvent,
     CoverageGraphSnapshot,
     MemoryCard,
     MemoryCardDuplicateSuggestion,
@@ -14,7 +15,9 @@ from app.models import (
     MemoryCompactionRun,
     ParticipantSession,
     ParticipantToken,
+    PendingSubagentEval,
     RawEvent,
+    SubagentVerdict,
     TokenStatus,
     TrainingChatMessage,
     TrainingChatSession,
@@ -94,6 +97,12 @@ def reset_token(token_id: str, db: Session = Depends(get_db)) -> ParticipantToke
         raise HTTPException(status_code=404, detail="Token not found")
     for run in db.query(TwinHarnessRun).filter(TwinHarnessRun.token_id == participant.id).all():
         db.delete(run)
+    for verdict in db.query(SubagentVerdict).filter(SubagentVerdict.token_id == participant.id).all():
+        db.delete(verdict)
+    for pending in db.query(PendingSubagentEval).filter(PendingSubagentEval.token_id == participant.id).all():
+        db.delete(pending)
+    for config_event in db.query(ConfigEvent).filter(ConfigEvent.token_id == participant.id).all():
+        db.delete(config_event)
     for run in db.query(AnalysisRun).filter(AnalysisRun.token_id == participant.id).all():
         db.delete(run)
     for event in db.query(RawEvent).filter(RawEvent.token_id == participant.id).all():
@@ -131,6 +140,14 @@ def reset_token(token_id: str, db: Session = Depends(get_db)) -> ParticipantToke
     participant.guide_persona = {}
     participant.guide_custom_prompt = None
     participant.memory_readiness_snapshot = {}
+    participant.active_experiment_variant_id = None
+    participant.dynamic_flow_modifiers = {}
+    participant.calibration_band = "unmeasured"
+    participant.calibration_ece = None
+    participant.calibration_temperature = 1.0
+    participant.session_started_at = None
+    participant.session_abort_reason = None
+    participant.briefing_acknowledged_at = None
     db.commit()
     db.refresh(participant)
     return participant
@@ -146,6 +163,12 @@ def delete_revoked_token(token_id: str, db: Session = Depends(get_db)) -> None:
 
     for run in db.query(TwinHarnessRun).filter(TwinHarnessRun.token_id == participant.id).all():
         db.delete(run)
+    for verdict in db.query(SubagentVerdict).filter(SubagentVerdict.token_id == participant.id).all():
+        db.delete(verdict)
+    for pending in db.query(PendingSubagentEval).filter(PendingSubagentEval.token_id == participant.id).all():
+        db.delete(pending)
+    for config_event in db.query(ConfigEvent).filter(ConfigEvent.token_id == participant.id).all():
+        db.delete(config_event)
     for run in db.query(AnalysisRun).filter(AnalysisRun.token_id == participant.id).all():
         db.delete(run)
     for evidence in db.query(BehavioralEvidence).filter(BehavioralEvidence.token_id == participant.id).all():

@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Float, Integer, JSON, DateTime, Enum, ForeignKey, String, Text
+from sqlalchemy import Boolean, Float, Index, Integer, JSON, DateTime, Enum, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -96,6 +96,15 @@ class ParticipantToken(Base):
     guide_persona: Mapped[dict | None] = mapped_column(JSON, default=dict, nullable=True)
     guide_custom_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     memory_readiness_snapshot: Mapped[dict | None] = mapped_column(JSON, default=dict, nullable=True)
+    active_experiment_variant_id: Mapped[str | None] = mapped_column(ForeignKey("experiment_variants.id"), nullable=True, index=True)
+    dynamic_flow_modifiers: Mapped[dict | None] = mapped_column(JSON, default=dict, nullable=True)
+    calibration_band: Mapped[str] = mapped_column(String(40), default="unmeasured", nullable=False, index=True)
+    calibration_ece: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calibration_temperature: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    session_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    session_time_budget_seconds: Mapped[int] = mapped_column(Integer, default=3600, nullable=False)
+    session_abort_reason: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    briefing_acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -114,6 +123,9 @@ class ParticipantToken(Base):
     coverage_snapshots: Mapped[list["CoverageGraphSnapshot"]] = relationship(back_populates="token", cascade="all, delete-orphan")
     duplicate_suggestions: Mapped[list["MemoryCardDuplicateSuggestion"]] = relationship(back_populates="token", cascade="all, delete-orphan")
     harness_runs: Mapped[list["TwinHarnessRun"]] = relationship(back_populates="token", cascade="all, delete-orphan")
+    active_experiment_variant: Mapped["ExperimentVariant | None"] = relationship(foreign_keys=[active_experiment_variant_id])
+    subagent_verdicts: Mapped[list["SubagentVerdict"]] = relationship(back_populates="token", cascade="all, delete-orphan")
+    pending_subagent_evals: Mapped[list["PendingSubagentEval"]] = relationship(back_populates="token", cascade="all, delete-orphan")
 
 
 class ParticipantSession(Base):
@@ -138,6 +150,9 @@ class RawEvent(Base):
     session_id: Mapped[str | None] = mapped_column(ForeignKey("participant_sessions.id"), nullable=True, index=True)
     event_type: Mapped[str] = mapped_column(String(120), index=True)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    holdout_slot: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    holdout_partition: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    answer_mode: Mapped[str] = mapped_column(String(20), default="binary", nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
     token: Mapped[ParticipantToken] = relationship(back_populates="events")
@@ -207,6 +222,10 @@ class MemoryCard(Base):
     body: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="draft", index=True)
     priority: Mapped[str] = mapped_column(String(40), default="medium", index=True)
+    card_type: Mapped[str] = mapped_column(String(20), default="disposition", nullable=False, index=True)
+    seed_source: Mapped[str] = mapped_column(String(40), default="compaction", nullable=False, index=True)
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reinforcement_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     source_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
@@ -233,9 +252,88 @@ class MemoryCardPillarLink(Base):
     card_id: Mapped[str] = mapped_column(ForeignKey("memory_cards.id"), index=True)
     pillar_key: Mapped[str] = mapped_column(String(80), index=True)
     weight: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    source_event_id: Mapped[str | None] = mapped_column(ForeignKey("raw_events.id"), nullable=True, index=True)
+    cumulative_delta_w: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    update_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
     card: Mapped[MemoryCard] = relationship(back_populates="pillar_links")
+
+
+class ExperimentVariant(Base):
+    __tablename__ = "experiment_variants"
+    __table_args__ = (
+        UniqueConstraint("label", "prompt_template_hash", "subagent_model_id", name="uq_experiment_variant_identity"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    label: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    delta_w_matrix: Mapped[dict] = mapped_column(JSON, default=dict)
+    subagent_model_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    subagent_reasoning_effort: Mapped[str] = mapped_column(String(20), default="high", nullable=False)
+    compaction_model_id: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    prompt_template_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    session_time_budget_seconds: Mapped[int] = mapped_column(Integer, default=3600, nullable=False)
+    target_accuracy_band: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class ConfigEvent(Base):
+    __tablename__ = "config_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    token_id: Mapped[str] = mapped_column(ForeignKey("participant_tokens.id"), index=True)
+    variant_id_before: Mapped[str | None] = mapped_column(ForeignKey("experiment_variants.id"), nullable=True, index=True)
+    variant_id_after: Mapped[str] = mapped_column(ForeignKey("experiment_variants.id"), index=True)
+    changed_by: Mapped[str] = mapped_column(String(255), default="admin", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class SubagentVerdict(Base):
+    __tablename__ = "subagent_verdicts"
+    __table_args__ = (
+        Index("idx_subagent_verdicts_event", "raw_event_id"),
+        Index("idx_subagent_verdicts_card", "card_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    raw_event_id: Mapped[str] = mapped_column(ForeignKey("raw_events.id"), index=True)
+    token_id: Mapped[str] = mapped_column(ForeignKey("participant_tokens.id"), index=True)
+    variant_id: Mapped[str | None] = mapped_column(ForeignKey("experiment_variants.id"), nullable=True, index=True)
+    card_id: Mapped[str] = mapped_column(ForeignKey("memory_cards.id"), index=True)
+    polarity: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    spectrum_position: Mapped[float | None] = mapped_column(Float, nullable=True)
+    delta_w_applied: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    model_latency_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+    token: Mapped[ParticipantToken] = relationship(back_populates="subagent_verdicts")
+    event: Mapped[RawEvent] = relationship()
+    card: Mapped[MemoryCard] = relationship()
+    variant: Mapped[ExperimentVariant | None] = relationship()
+
+
+class PendingSubagentEval(Base):
+    __tablename__ = "pending_subagent_evals"
+    __table_args__ = (
+        Index("idx_pending_subagent_unprocessed", "processed_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    raw_event_id: Mapped[str] = mapped_column(ForeignKey("raw_events.id"), index=True)
+    token_id: Mapped[str] = mapped_column(ForeignKey("participant_tokens.id"), index=True)
+    variant_id: Mapped[str | None] = mapped_column(ForeignKey("experiment_variants.id"), nullable=True, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    token: Mapped[ParticipantToken] = relationship(back_populates="pending_subagent_evals")
+    event: Mapped[RawEvent] = relationship()
+    variant: Mapped[ExperimentVariant | None] = relationship()
 
 
 class MemoryCardDuplicateSuggestion(Base):

@@ -22,6 +22,10 @@ export type ParticipantToken = {
     event_count?: number;
     latest_analysis_status?: string | null;
     evidence_count?: number;
+    calibration_band?: string;
+    calibration_ece?: number | null;
+    calibration_temperature?: number;
+    active_experiment_variant_id?: string | null;
 };
 
 export type RawEvent = {
@@ -30,6 +34,9 @@ export type RawEvent = {
     session_id: string | null;
     event_type: string;
     payload: Record<string, unknown>;
+    holdout_slot?: boolean;
+    holdout_partition?: string | null;
+    answer_mode?: string;
     created_at: string;
     token_label?: string | null;
 };
@@ -234,8 +241,12 @@ export type TrainingState = {
 };
 
 export type MemoryCardPillarLink = {
+    id?: string | null;
     pillar_key: string;
     weight: number;
+    cumulative_delta_w?: number;
+    update_count?: number;
+    last_updated_at?: string | null;
 };
 
 export type MemoryCardDuplicateSuggestion = {
@@ -255,6 +266,10 @@ export type MemoryCard = {
     body: string;
     status: string;
     priority: string;
+    card_type?: string;
+    seed_source?: string;
+    reinforcement_count?: number;
+    promoted_at?: string | null;
     source_quote?: string | null;
     pillar_links: MemoryCardPillarLink[];
     duplicate_suggestions: MemoryCardDuplicateSuggestion[];
@@ -288,6 +303,18 @@ export type TokenDetail = {
     analysis_runs: AnalysisRun[];
     evidence: BehavioralEvidence[];
     latest_harness_run?: TwinHarnessRun | null;
+};
+
+export type V2State = {
+    token_id: string;
+    v2_enabled: boolean;
+    calibration_band: string;
+    calibration_ece: number | null;
+    calibration_temperature: number;
+    active_variant?: Record<string, unknown> | null;
+    event_counts: Record<string, number>;
+    cards: Array<Record<string, unknown>>;
+    recent_verdicts: Array<Record<string, unknown>>;
 };
 
 export type AnalysisRunDetail = AnalysisRun & {

@@ -13,11 +13,15 @@ from app.schemas import (
     BehavioralEvidenceResponse,
     ErrorReportResponse,
     EventResponse,
+    MemoryCardPillarLinkResponse,
+    MemoryCardResponse,
     OpenVikingStatusResponse,
     OpenVikingTokenStateResponse,
     SessionResponse,
     TwinHarnessRunDetailResponse,
     TwinHarnessRunResponse,
+    V2PreseedCardsResponse,
+    V2StateResponse,
 )
 from app.services.analysis_service import analyze_token
 from app.services.harness_service import get_harness_run, run_harness_for_token
@@ -27,6 +31,7 @@ from app.services.openviking_service import (
     openviking_token_state,
     sync_openviking_for_token,
 )
+from app.services.v2_lineage_service import activate_v2_token, build_v2_state, preseed_cards
 
 router = APIRouter(prefix="/api/admin", tags=["analysis"], dependencies=[Depends(require_admin_secret)])
 
@@ -125,6 +130,41 @@ def get_token_detail(token_id: str, db: Session = Depends(get_db)) -> AdminToken
     )
 
 
+@router.get("/tokens/{token_id}/v2-state", response_model=V2StateResponse)
+def get_token_v2_state(token_id: str, db: Session = Depends(get_db)) -> dict:
+    participant = db.get(ParticipantToken, token_id)
+    if participant is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+    return build_v2_state(db, participant)
+
+
+@router.post("/tokens/{token_id}/preseed-cards", response_model=V2PreseedCardsResponse)
+def preseed_token_cards(token_id: str, db: Session = Depends(get_db)) -> V2PreseedCardsResponse:
+    participant = db.get(ParticipantToken, token_id)
+    if participant is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+    cards = preseed_cards(db, participant)
+    db.commit()
+    for card in cards:
+        db.refresh(card)
+    return V2PreseedCardsResponse(
+        token_id=participant.id,
+        created_or_existing_count=len(cards),
+        cards=[_memory_card_response(card) for card in cards],
+    )
+
+
+@router.post("/tokens/{token_id}/activate-v2", response_model=V2StateResponse)
+def activate_token_v2(token_id: str, db: Session = Depends(get_db)) -> dict:
+    participant = db.get(ParticipantToken, token_id)
+    if participant is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+    activate_v2_token(db, participant)
+    db.commit()
+    db.refresh(participant)
+    return build_v2_state(db, participant)
+
+
 @router.post("/tokens/{token_id}/analyze", response_model=AnalysisRunResponse)
 def analyze_participant_token(token_id: str, db: Session = Depends(get_db)) -> AnalysisRun:
     participant = db.get(ParticipantToken, token_id)
@@ -206,3 +246,32 @@ def get_analysis_run(analysis_run_id: str, db: Session = Depends(get_db)) -> Ana
 @router.get("/tokens/{token_id}/evidence", response_model=list[BehavioralEvidenceResponse])
 def list_behavioral_evidence(token_id: str, db: Session = Depends(get_db)) -> list[BehavioralEvidence]:
     return db.query(BehavioralEvidence).filter(BehavioralEvidence.token_id == token_id).order_by(BehavioralEvidence.created_at.desc()).all()
+
+
+def _memory_card_response(card) -> MemoryCardResponse:
+    return MemoryCardResponse(
+        id=card.id,
+        title=card.title,
+        body=card.body,
+        status=card.status,
+        priority=card.priority,
+        card_type=card.card_type,
+        seed_source=card.seed_source,
+        reinforcement_count=card.reinforcement_count,
+        promoted_at=card.promoted_at,
+        source_quote=card.source_quote,
+        pillar_links=[
+            MemoryCardPillarLinkResponse(
+                id=link.id,
+                pillar_key=link.pillar_key,
+                weight=link.weight,
+                cumulative_delta_w=link.cumulative_delta_w,
+                update_count=link.update_count,
+                last_updated_at=link.last_updated_at,
+            )
+            for link in card.pillar_links
+        ],
+        duplicate_suggestions=[],
+        created_at=card.created_at,
+        updated_at=card.updated_at,
+    )

@@ -4,10 +4,10 @@ from copy import deepcopy
 from typing import Any
 
 
-MIN_ADAPTIVE_QUESTIONS = 5
-MAX_ADAPTIVE_QUESTIONS = 8
+MIN_ADAPTIVE_QUESTIONS = 20
+MAX_ADAPTIVE_QUESTIONS = 25
 COMPLETION_CONFIDENCE = 0.80
-MIN_REPLAY_START_QUESTIONS = 2
+MIN_REPLAY_START_QUESTIONS = 8
 REPLAY_SCENARIO_COUNT = 2
 TWIN_RESPONSES_PER_REPLAY = 3
 
@@ -146,13 +146,30 @@ def normalize_generated_step(raw_step: dict[str, Any], question_number: int) -> 
         step_type = fallback["type"]
         normalized_options = fallback["options"]
 
-    return {
+    normalized = {
         "id": f"adaptive_q_{question_number}",
         "type": step_type,
         "title": _string_or_default(raw_step.get("title"), f"Adaptive Question {question_number}"),
         "prompt": _string_or_default(raw_step.get("prompt"), fallback_step(question_number)["prompt"]),
         "options": normalized_options,
     }
+    for key in (
+        "generation_source",
+        "acp_domain",
+        "life_state",
+        "signal_goal",
+        "singapore_context_notes",
+        "council_models_successful",
+        "council_models_failed",
+        "council_min_successes",
+        "council_chair_model",
+        "council_chair_status",
+        "council_chair_rationale",
+        "cultural_sensitivity_flags",
+    ):
+        if key in raw_step:
+            normalized[key] = raw_step[key]
+    return normalized
 
 
 def fallback_step(question_number: int) -> dict[str, Any]:
@@ -182,7 +199,9 @@ def event_type_for_step(step_type: str) -> str:
         "triad": "triad_answered",
         "duel": "duel_answered",
         "context_flip": "context_flip_answered",
+        "correction": "correction_answered",
         "twin_rank": "twin_response_ranked",
+        "indifference": "indifference_answered",
     }.get(step_type, "scenario_step_answered")
 
 

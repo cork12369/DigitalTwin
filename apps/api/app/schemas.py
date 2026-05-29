@@ -21,6 +21,10 @@ class TokenResponse(BaseModel):
     last_seen_at: datetime | None
     completed_at: datetime | None
     initialization_status: str = "not_started"
+    calibration_band: str = "unmeasured"
+    calibration_ece: float | None = None
+    calibration_temperature: float = 1.0
+    active_experiment_variant_id: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -56,6 +60,9 @@ class EventResponse(BaseModel):
     session_id: str | None
     event_type: str
     payload: dict
+    holdout_slot: bool = False
+    holdout_partition: str | None = None
+    answer_mode: str = "binary"
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -124,6 +131,10 @@ class ScenarioStep(BaseModel):
     replay_scenario_id: str | None = None
     replay_index: int | None = None
     source_context_step_id: str | None = None
+    context_kind: str | None = None
+    holdout_slot: bool | None = None
+    holdout_partition: str | None = None
+    phase: str | None = None
 
 
 class SessionStartRequest(BaseModel):
@@ -154,6 +165,7 @@ class StepAnswerRequest(BaseModel):
     step_id: str = Field(min_length=1)
     step_type: str = Field(min_length=1)
     answer: dict = Field(default_factory=dict)
+    answer_mode: str | None = Field(default=None, max_length=20)
 
 
 class StepAnswerResponse(BaseModel):
@@ -358,8 +370,14 @@ class MemoryCardsListRequest(BaseModel):
 
 
 class MemoryCardPillarLinkResponse(BaseModel):
+    id: str | None = None
     pillar_key: str
     weight: float
+    cumulative_delta_w: float = 0.0
+    update_count: int = 0
+    last_updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
 
 
 class MemoryCardDuplicateSuggestionResponse(BaseModel):
@@ -381,6 +399,10 @@ class MemoryCardResponse(BaseModel):
     body: str
     status: str
     priority: str
+    card_type: str = "disposition"
+    seed_source: str = "compaction"
+    reinforcement_count: int = 0
+    promoted_at: datetime | None = None
     source_quote: str | None
     pillar_links: list[MemoryCardPillarLinkResponse]
     duplicate_suggestions: list[MemoryCardDuplicateSuggestionResponse] = Field(default_factory=list)
@@ -416,3 +438,46 @@ class TrainingDiagnosticsResponse(BaseModel):
     readiness: dict
     graph: dict
     latest_snapshot: dict | None = None
+
+
+class V2PreseedCardsResponse(BaseModel):
+    token_id: str
+    created_or_existing_count: int
+    cards: list[MemoryCardResponse]
+
+
+class ExperimentVariantResponse(BaseModel):
+    id: str
+    label: str
+    delta_w_matrix: dict
+    subagent_model_id: str
+    subagent_reasoning_effort: str
+    prompt_template_hash: str
+    session_time_budget_seconds: int
+    target_accuracy_band: dict
+    created_at: datetime
+
+
+class SubagentVerdictResponse(BaseModel):
+    id: str
+    raw_event_id: str
+    card_id: str
+    polarity: str
+    confidence: float
+    spectrum_position: float | None
+    delta_w_applied: float
+    rationale: str
+    model_latency_ms: int
+    created_at: datetime
+
+
+class V2StateResponse(BaseModel):
+    token_id: str
+    v2_enabled: bool
+    calibration_band: str
+    calibration_ece: float | None
+    calibration_temperature: float
+    active_variant: ExperimentVariantResponse | None = None
+    event_counts: dict
+    cards: list[dict]
+    recent_verdicts: list[SubagentVerdictResponse]

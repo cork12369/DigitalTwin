@@ -121,6 +121,7 @@ export default async function TokenAdminPage({ searchParams }: PageProps) {
                                         <div className="muted">Events captured: {token.event_count ?? 0}</div>
                                         <div className="muted">Evidence: {token.evidence_count ?? 0}</div>
                                         <div className="muted">Latest analysis: {token.latest_analysis_status ?? "not run"}</div>
+                                        <div className="muted">Calibration: {token.calibration_band ?? "unmeasured"}</div>
                                     </div>
                                     <span className="status"><span className="dot" />{token.status}</span>
                                 </div>

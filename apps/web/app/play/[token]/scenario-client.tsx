@@ -16,6 +16,10 @@ type ScenarioStep = {
     replay_scenario_id?: string | null;
     replay_index?: number | null;
     source_context_step_id?: string | null;
+    context_kind?: string | null;
+    holdout_slot?: boolean | null;
+    holdout_partition?: string | null;
+    phase?: string | null;
 };
 
 type SessionState = {
@@ -40,6 +44,7 @@ type SessionState = {
 export function ScenarioClient({ token, initialState }: { token: string; initialState: SessionState }) {
     const [state, setState] = useState(initialState);
     const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+    const [answerMode, setAnswerMode] = useState<"binary" | "custom_text" | "indifferent">("binary");
     const [text, setText] = useState("");
     const [ranked, setRanked] = useState<string[]>([]);
     const [rejected, setRejected] = useState<string[]>([]);
@@ -61,6 +66,7 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
 
     function resetInputs() {
         setSelectedIndex(null);
+        setAnswerMode("binary");
         setText("");
         setRanked([]);
         setRejected([]);
@@ -76,6 +82,12 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
 
     function buildAnswer(step: ScenarioStep) {
         if (step.type === "onboarding") return { user_profile: text.trim() };
+        if ((step.type === "triad" || step.type === "duel") && answerMode === "indifferent") {
+            return { mode: "indifferent", text: text.trim() };
+        }
+        if ((step.type === "triad" || step.type === "duel") && answerMode === "custom_text") {
+            return { mode: "custom_text", text: text.trim() };
+        }
         if ((step.type === "triad" || step.type === "duel") && selectedIndex !== null) {
             return {
                 selected_index: selectedIndex,
@@ -83,6 +95,7 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
             };
         }
         if (step.type === "context_flip") return { text: text.trim() };
+        if (step.type === "correction") return { text: text.trim() };
         if (step.type === "twin_rank") {
             return {
                 ranked_options: ranked,
@@ -95,8 +108,13 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
 
     function canSubmit(step: ScenarioStep) {
         if (step.type === "onboarding") return Boolean(cvFile) || text.trim().length >= 2;
-        if (step.type === "triad" || step.type === "duel") return selectedIndex !== null;
+        if (step.type === "triad" || step.type === "duel") {
+            if (answerMode === "indifferent") return true;
+            if (answerMode === "custom_text") return text.trim().length >= 1;
+            return selectedIndex !== null;
+        }
         if (step.type === "context_flip") return text.trim().length >= 1;
+        if (step.type === "correction") return text.trim().length >= 1;
         if (step.type === "twin_rank") return ranked.length === (step.options?.length ?? 0);
         return true;
     }
@@ -110,7 +128,9 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
     }
 
     function stepLabel(step: ScenarioStep) {
+        if (step.holdout_slot) return "Holdout check";
         if (step.type === "onboarding") return "Profile setup";
+        if (step.type === "correction") return "Correction";
         if (step.type === "context_flip") return `Replay ${step.replay_index ?? (state.replay_context_count + 1)} of ${maxReplayScenarios}`;
         if (step.type === "twin_rank") return `Replay ${step.replay_index ?? (state.replay_scenario_count + 1)} response ranking`;
         return `MCQ ${state.adaptive_question_count + 1} of up to ${state.max_adaptive_questions}`;
@@ -145,6 +165,7 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
                             token,
                             step_id: currentStep.id,
                             step_type: currentStep.type,
+                            answer_mode: currentStep.type === "triad" || currentStep.type === "duel" ? answerMode : undefined,
                             answer: buildAnswer(currentStep),
                         }),
                         cache: "no-store",
@@ -226,19 +247,51 @@ export function ScenarioClient({ token, initialState }: { token: string; initial
                             className={`choice ${selectedIndex === index ? "selected" : ""}`}
                             key={`${currentStep.id}-${index}`}
                             type="button"
-                            onClick={() => setSelectedIndex(index)}
+                            onClick={() => {
+                                setAnswerMode("binary");
+                                setSelectedIndex(index);
+                            }}
                         >
                             {option}
                         </button>
                     ))}
+                    <div className="row" style={{ justifyContent: "flex-start" }}>
+                        <button
+                            className={`button secondary ${answerMode === "indifferent" ? "selected" : ""}`}
+                            type="button"
+                            onClick={() => {
+                                setAnswerMode("indifferent");
+                                setSelectedIndex(null);
+                            }}
+                        >
+                            No preference
+                        </button>
+                        <button
+                            className={`button secondary ${answerMode === "custom_text" ? "selected" : ""}`}
+                            type="button"
+                            onClick={() => {
+                                setAnswerMode("custom_text");
+                                setSelectedIndex(null);
+                            }}
+                        >
+                            Custom answer
+                        </button>
+                    </div>
+                    {answerMode !== "binary" && (
+                        <textarea
+                            value={text}
+                            onChange={(event) => setText(event.target.value)}
+                            placeholder={answerMode === "indifferent" ? "Optional: what makes these options feel equivalent?" : "Describe your actual choice boundary..."}
+                        />
+                    )}
                 </div>
             )}
 
-            {currentStep.type === "context_flip" && (
+            {(currentStep.type === "context_flip" || currentStep.type === "correction") && (
                 <textarea
                     value={text}
                     onChange={(event) => setText(event.target.value)}
-                    placeholder="Write what changes, what stays the same, and what would decide it..."
+                    placeholder={currentStep.type === "correction" ? "Correct the model's current read..." : "Write what changes, what stays the same, and what would decide it..."}
                 />
             )}
 

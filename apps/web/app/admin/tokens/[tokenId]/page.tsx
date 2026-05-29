@@ -3,7 +3,7 @@ import Link from "next/link";
 import { analyzeTokenAction } from "../actions";
 import { HarnessRunButton } from "./harness-run-button";
 import { OpenVikingTestButton } from "./openviking-test-button";
-import { type AnalysisRunDetail, type OpenVikingTokenState, type TokenDetail, type TrainingDiagnostics, type TwinHarnessRunDetail, type TwinHarnessScore } from "@/lib/api";
+import { type AnalysisRunDetail, type OpenVikingTokenState, type TokenDetail, type TrainingDiagnostics, type TwinHarnessRunDetail, type TwinHarnessScore, type V2State } from "@/lib/api";
 import { adminApiFetch } from "@/lib/api-server";
 
 type PageProps = {
@@ -65,6 +65,16 @@ async function getHarnessRunDetail(runId: string | undefined): Promise<TwinHarne
 async function getOpenVikingState(tokenId: string): Promise<OpenVikingTokenState | null> {
     try {
         const response = await adminApiFetch(`/api/admin/tokens/${tokenId}/openviking/state`, { cache: "no-store" });
+        if (!response.ok) return null;
+        return response.json();
+    } catch {
+        return null;
+    }
+}
+
+async function getV2State(tokenId: string): Promise<V2State | null> {
+    try {
+        const response = await adminApiFetch(`/api/admin/tokens/${tokenId}/v2-state`, { cache: "no-store" });
         if (!response.ok) return null;
         return response.json();
     } catch {
@@ -310,6 +320,7 @@ export default async function TokenDetailPage({ params }: PageProps) {
     const latestRunDetail = await getRunDetail(latestRun?.id);
     const latestHarnessDetail = await getHarnessRunDetail(detail?.latest_harness_run?.id);
     const openVikingState = detail ? await getOpenVikingState(tokenId) : null;
+    const v2State = detail ? await getV2State(tokenId) : null;
     const latestOpenVikingRunDetail = await getHarnessRunDetail(openVikingState?.latest_test_run?.id);
     const trainingDiagnostics = detail ? await getTrainingDiagnostics(tokenId) : null;
 
@@ -351,6 +362,7 @@ export default async function TokenDetailPage({ params }: PageProps) {
                         <p className="muted">Session: {detail.participant.session_status ?? "not started"}</p>
                         <p className="muted">Current step: {detail.participant.current_step ?? "--"}</p>
                         <p className="muted">Initialization: {detail.participant.initialization_status ?? "not_started"}</p>
+                        <p className="muted">Calibration: {detail.participant.calibration_band ?? "unmeasured"}</p>
                     </article>
                     <article className="panel">
                         <h2>Captured Data</h2>
@@ -365,6 +377,38 @@ export default async function TokenDetailPage({ params }: PageProps) {
                         <p className="muted">Last seen: {formatDate(detail.participant.last_seen_at)}</p>
                         <p className="muted">Completed: {formatDate(detail.participant.completed_at)}</p>
                     </article>
+                </section>
+
+                <section className="panel stack">
+                    <div className="row">
+                        <div>
+                            <h2>V2 Lineage</h2>
+                            <p className="muted">Backend scoring state for card weights, holdouts, and recent subagent verdicts.</p>
+                        </div>
+                        <span className="status"><span className="dot" />{v2State?.v2_enabled ? "active" : "inactive"}</span>
+                    </div>
+                    {!v2State ? <p className="muted">V2 state is unavailable.</p> : (
+                        <div className="grid">
+                            <article className="compact-panel">
+                                <h3>Calibration</h3>
+                                <p className="muted">Band: {v2State.calibration_band}</p>
+                                <p className="muted">ECE: {formatMetric(v2State.calibration_ece)}</p>
+                                <p className="muted">Temperature: {formatMetric(v2State.calibration_temperature)}</p>
+                            </article>
+                            <article className="compact-panel">
+                                <h3>Events</h3>
+                                <p className="muted">Training: {String(v2State.event_counts.training ?? 0)}</p>
+                                <p className="muted">Holdout: {String(v2State.event_counts.holdout ?? 0)}</p>
+                                <p className="muted">Pending: {String(v2State.event_counts.pending_subagent ?? 0)}</p>
+                            </article>
+                            <article className="compact-panel">
+                                <h3>Cards</h3>
+                                <p className="muted">Total: {v2State.cards.length}</p>
+                                <p className="muted">Recent verdicts: {v2State.recent_verdicts.length}</p>
+                                <p className="muted">Variant: {String(v2State.active_variant?.label ?? "none")}</p>
+                            </article>
+                        </div>
+                    )}
                 </section>
 
                 <section className="grid">

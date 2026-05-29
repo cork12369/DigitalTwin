@@ -10,7 +10,7 @@ export function TokenActions({ tokenId, status }: { tokenId: string; status: str
     const [busy, setBusy] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
 
-    async function handleAction(action: "analyze" | "delete" | "reset" | "revoke") {
+    async function handleAction(action: "activate-v2" | "analyze" | "delete" | "preseed-cards" | "reset" | "revoke") {
         setBusy(action);
         setError(null);
         try {
@@ -41,6 +41,22 @@ export function TokenActions({ tokenId, status }: { tokenId: string; status: str
 
     return (
         <div className="row" style={{ justifyContent: "flex-end" }}>
+            <button
+                className="button secondary"
+                disabled={isRevoked || busy !== null}
+                onClick={() => handleAction("preseed-cards")}
+                type="button"
+            >
+                {busy === "preseed-cards" ? "Seeding..." : "Preseed Cards"}
+            </button>
+            <button
+                className="button secondary"
+                disabled={isRevoked || busy !== null}
+                onClick={() => handleAction("activate-v2")}
+                type="button"
+            >
+                {busy === "activate-v2" ? "Activating..." : "Activate V2"}
+            </button>
             <button
                 className="button secondary"
                 disabled={isRevoked || busy !== null}

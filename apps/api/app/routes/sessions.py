@@ -43,6 +43,7 @@ from app.services.harness_service import queue_harness_run, run_harness_job
 from app.services.openviking_service import queue_openviking_sync, run_openviking_sync_job
 from app.services.profile_service import ProfileIngestionResult, build_manual_profile, ingest_cv_pdf
 from app.services.token_service import find_by_raw_token, get_or_create_session, validate_and_touch_token
+from app.services.v2_lineage_service import finalize_calibration, queue_subagent_eval_for_event
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -155,7 +156,9 @@ def answer_step(
     if step["type"] == "onboarding":
         event = _answer_onboarding(db, participant, session, step, payload.answer)
     else:
-        event = _answer_generated_step(db, participant, session, step, payload.answer)
+        event = _answer_generated_step(db, participant, session, step, payload.answer, payload.answer_mode)
+        if participant.active_experiment_variant_id:
+            background_tasks.add_task(queue_subagent_eval_for_event, event.id)
     _queue_completed_harness(db, participant, session, background_tasks, "scenario_completion")
 
     return StepAnswerResponse(
@@ -267,25 +270,34 @@ def _answer_generated_step(
     session: ParticipantSession,
     step: dict[str, Any],
     answer: dict[str, Any],
+    requested_answer_mode: str | None = None,
 ) -> RawEvent:
     step_type = str(step.get("type"))
+    answer_mode = _answer_mode(step, answer, requested_answer_mode)
     if step_type in {"triad", "duel"}:
-        normalized_answer = _choice_answer(step, answer)
+        if answer_mode == "indifferent":
+            normalized_answer = _indifferent_answer(answer)
+        elif answer_mode == "custom_text":
+            normalized_answer = _choice_text_answer(answer)
+        else:
+            normalized_answer = _choice_answer(step, answer)
     elif step_type == "context_flip":
+        normalized_answer = _text_answer(step, answer)
+    elif step_type == "correction":
         normalized_answer = _text_answer(step, answer)
     elif step_type == "twin_rank":
         normalized_answer = _twin_rank_answer(step, answer)
     else:
         raise HTTPException(status_code=400, detail="Unsupported generated step type")
 
-    event = _create_step_event(db, participant, session, step, normalized_answer)
+    event = _create_step_event(db, participant, session, step, normalized_answer, answer_mode)
     participant.status = TokenStatus.in_progress
     session.status = SessionStatus.in_progress
     db.commit()
     db.refresh(event)
 
     events = _session_events(db, session.id)
-    if step_type in {"triad", "duel"}:
+    if step_type in {"triad", "duel"} and answer_mode == "binary":
         _apply_generation_result(
             participant,
             record_adaptive_choice_signal(
@@ -318,6 +330,7 @@ def _advance_session(
         _mark_completed(db, participant, session, events)
         return
 
+    next_step = _decorate_v2_step(participant, next_step, events)
     _append_adaptive_step(participant, next_step)
     session.current_step = next_step["id"]
 
@@ -334,6 +347,10 @@ def _next_generated_step(participant: ParticipantToken, events: list[RawEvent]) 
         )
         _apply_generation_result(participant, result)
         return result.next_step
+
+    correction_step = _next_v2_correction_step(participant, events)
+    if correction_step is not None:
+        return correction_step
 
     adaptive_count = _adaptive_answer_count(events)
     if _should_generate_context_flip(participant, events):
@@ -355,6 +372,8 @@ def _next_generated_step(participant: ParticipantToken, events: list[RawEvent]) 
         adaptive_answer_count=adaptive_count,
     )
     _apply_generation_result(participant, result)
+    if result.next_step is None and result.metadata.get("status") == "council_failed":
+        return None
     if result.should_complete:
         if _twin_rank_answer_count(events) >= REPLAY_SCENARIO_COUNT:
             return None
@@ -391,6 +410,95 @@ def _should_generate_context_flip(participant: ParticipantToken, events: list[Ra
     if should_complete(adaptive_count, _state_confidence(participant)):
         return True
     return _stable_replay_pick(participant, events)
+
+
+def _next_v2_correction_step(participant: ParticipantToken, events: list[RawEvent]) -> dict[str, Any] | None:
+    if not participant.active_experiment_variant_id:
+        return None
+    adaptive_count = _adaptive_answer_count(events)
+    if adaptive_count <= 0 or adaptive_count % 6 != 0:
+        return None
+    step_id = f"correction_{adaptive_count // 6}"
+    if any(isinstance(event.payload, dict) and event.payload.get("step_id") == step_id for event in events):
+        return None
+    context_items = _preliminary_twin_read(participant, events)
+    return {
+        "id": step_id,
+        "type": "correction",
+        "title": "Preliminary Twin Read",
+        "prompt": "What is wrong, incomplete, or overconfident in this read of how you make decisions?",
+        "context_title": "Preliminary twin read",
+        "context_items": context_items,
+        "context_kind": "preliminary_twin_read",
+    }
+
+
+def _decorate_v2_step(participant: ParticipantToken, step: dict[str, Any], events: list[RawEvent]) -> dict[str, Any]:
+    if not participant.active_experiment_variant_id:
+        return step
+    decorated = dict(step)
+    modifiers = participant.dynamic_flow_modifiers if isinstance(participant.dynamic_flow_modifiers, dict) else {}
+    warmup_count = int(modifiers.get("warmup_event_count") or 3)
+    holdout_every_n = max(2, int(modifiers.get("holdout_every_n") or 5))
+    target_holdout_count = max(0, int(modifiers.get("target_holdout_count") or 10))
+    answered_count = _generated_answer_event_count(events)
+    holdout_count = _holdout_event_count(events)
+
+    decorated["phase"] = "warmup" if answered_count < warmup_count else "main_probe"
+    if (
+        decorated.get("type") in {"triad", "duel", "twin_rank"}
+        and isinstance(decorated.get("options"), list)
+        and answered_count >= warmup_count
+        and holdout_count < target_holdout_count
+        and (answered_count + 1) % holdout_every_n == 0
+    ):
+        decorated["holdout_slot"] = True
+        decorated["holdout_partition"] = "v2_periodic"
+        decorated["phase"] = "holdout"
+    else:
+        decorated.setdefault("holdout_slot", False)
+    return decorated
+
+
+def _preliminary_twin_read(participant: ParticipantToken, events: list[RawEvent]) -> list[str]:
+    state = participant.adaptive_scenario_state if isinstance(participant.adaptive_scenario_state, dict) else {}
+    axis_scores = state.get("axis_scores") if isinstance(state.get("axis_scores"), dict) else {}
+    top_axes = sorted(axis_scores.items(), key=lambda item: item[1], reverse=True)[:3]
+    items = [f"Current confidence: {round(_state_confidence(participant) * 100)}%"]
+    for axis, score in top_axes:
+        if score:
+            items.append(f"Repeated signal: {axis.replace('_', ' ')} ({score})")
+    latest_text = _latest_answer_text(events)
+    if latest_text:
+        items.append(f"Recent answer signal: {latest_text[:220]}")
+    if len(items) == 1:
+        items.append("Not enough signal yet; use this correction to name what the model should watch for.")
+    return items[:4]
+
+
+def _latest_answer_text(events: list[RawEvent]) -> str | None:
+    for event in reversed(events):
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        answer = payload.get("answer") if isinstance(payload.get("answer"), dict) else {}
+        for key in ("selected_option", "text", "correction_text"):
+            value = answer.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _generated_answer_event_count(events: list[RawEvent]) -> int:
+    return sum(
+        1
+        for event in events
+        if isinstance(event.payload, dict)
+        and event.event_type != "scenario_completed"
+        and event.payload.get("step_type") not in {None, "onboarding"}
+    )
+
+
+def _holdout_event_count(events: list[RawEvent]) -> int:
+    return sum(1 for event in events if bool(getattr(event, "holdout_slot", False)))
 
 
 def _stable_replay_pick(participant: ParticipantToken, events: list[RawEvent]) -> bool:
@@ -438,21 +546,33 @@ def _create_step_event(
     session: ParticipantSession,
     step: dict[str, Any],
     answer: dict[str, Any],
+    answer_mode: str = "binary",
 ) -> RawEvent:
+    event_step_type = "indifference" if answer_mode == "indifferent" else step["type"]
     event_payload = {
         "step_id": step["id"],
-        "step_type": step["type"],
+        "step_type": event_step_type,
+        "original_step_type": step["type"],
+        "answer_mode": answer_mode,
         "answer": answer,
         "step_snapshot": step,
     }
     if step.get("replay_scenario_id"):
         event_payload["replay_scenario_id"] = step["replay_scenario_id"]
+    if step.get("phase"):
+        event_payload["phase"] = step["phase"]
+    if step.get("holdout_slot"):
+        event_payload["holdout_slot"] = True
+        event_payload["holdout_partition"] = step.get("holdout_partition") or "v2_periodic"
 
     event = RawEvent(
         token_id=participant.id,
         session_id=session.id,
-        event_type=event_type_for_step(step["type"]),
+        event_type=event_type_for_step(event_step_type),
         payload=event_payload,
+        holdout_slot=bool(step.get("holdout_slot")),
+        holdout_partition=step.get("holdout_partition"),
+        answer_mode=answer_mode,
     )
     db.add(event)
     return event
@@ -552,6 +672,8 @@ def _mark_completed(
     participant.status = TokenStatus.completed
     participant.initialization_status = "ready_to_train"
     participant.completed_at = datetime.now(timezone.utc)
+    if participant.active_experiment_variant_id:
+        finalize_calibration(db, participant)
 
 
 def _apply_generation_result(participant: ParticipantToken, result: AdaptiveGenerationResult) -> None:
@@ -601,6 +723,41 @@ def _choice_answer(step: dict[str, Any], answer: dict[str, Any]) -> dict[str, An
         "selected_index": selected_index,
         "selected_option": expected_option,
     }
+
+
+def _answer_mode(step: dict[str, Any], answer: dict[str, Any], requested: str | None) -> str:
+    raw_mode = requested or answer.get("mode") or answer.get("answer_mode")
+    if isinstance(raw_mode, str):
+        normalized = raw_mode.strip().lower()
+        if normalized in {"binary", "indifferent", "custom_text", "chat"}:
+            return normalized
+    if step.get("type") in {"context_flip", "correction"}:
+        return "custom_text"
+    if step.get("type") == "twin_rank":
+        return "binary"
+    if isinstance(answer.get("text"), str) and not isinstance(answer.get("selected_index"), int):
+        return "custom_text"
+    return "binary"
+
+
+def _indifferent_answer(answer: dict[str, Any]) -> dict[str, Any]:
+    text = answer.get("text")
+    normalized: dict[str, Any] = {"mode": "indifferent"}
+    if isinstance(text, str) and text.strip():
+        normalized["text"] = text.strip()[:2000]
+    return normalized
+
+
+def _choice_text_answer(answer: dict[str, Any]) -> dict[str, Any]:
+    value = answer.get("text") or answer.get("custom_text")
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail="text is required for a custom answer")
+    text = value.strip()
+    if len(text) < 1:
+        raise HTTPException(status_code=400, detail="text is required for a custom answer")
+    if len(text) > 2000:
+        raise HTTPException(status_code=400, detail="text must be 2000 characters or fewer")
+    return {"mode": "custom_text", "text": text}
 
 
 def _text_answer(step: dict[str, Any], answer: dict[str, Any]) -> dict[str, Any]:
@@ -678,7 +835,10 @@ def _adaptive_answer_count(events: list[RawEvent]) -> int:
         1
         for event in events
         if isinstance(event.payload, dict)
-        and event.payload.get("step_type") in {"triad", "duel"}
+        and (
+            event.payload.get("step_type") in {"triad", "duel", "indifference"}
+            or event.payload.get("original_step_type") in {"triad", "duel"}
+        )
         and str(event.payload.get("step_id", "")).startswith("adaptive_q_")
     )
 

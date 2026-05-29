@@ -93,6 +93,7 @@ class GuidePersonaPayload(BaseModel):
 class MemoryCardCandidate(BaseModel):
     title: str = Field(min_length=1, max_length=180)
     body: str = Field(min_length=1, max_length=1200)
+    card_type: str = "disposition"
     pillar_weights: dict[str, float] = Field(default_factory=dict)
     suggested_priority: str = "medium"
     source_quote: str | None = Field(default=None, max_length=1000)
@@ -101,6 +102,7 @@ class MemoryCardCandidate(BaseModel):
     def validate_pillars(self) -> "MemoryCardCandidate":
         self.pillar_weights = _normalize_pillar_weights(self.pillar_weights)
         self.suggested_priority = _normalize_priority(self.suggested_priority)
+        self.card_type = _normalize_card_type(self.card_type)
         return self
 
 
@@ -591,6 +593,7 @@ Do not create cards from the assistant's invented claims unless the user accepte
                     {
                         "title": "Short memory card title",
                         "body": "Concrete first-person-neutral claim about the user.",
+                        "card_type": "disposition",
                         "pillar_weights": {"situation_framing": 1.0},
                         "suggested_priority": "medium",
                         "source_quote": "Short user quote when available.",
@@ -634,6 +637,8 @@ def _create_cards_from_payload(
             body=candidate.body.strip()[:1200],
             status="draft",
             priority=_normalize_priority(candidate.suggested_priority),
+            card_type=_normalize_card_type(candidate.card_type),
+            seed_source="compaction",
             source_quote=(candidate.source_quote or None),
             metadata_json={"source": "compaction", "created_as_draft": True},
         )
@@ -833,6 +838,11 @@ def _valid_persona(persona: dict[str, Any]) -> bool:
 def _normalize_priority(value: str) -> str:
     normalized = str(value or "medium").strip().lower()
     return normalized if normalized in PRIORITY_WEIGHTS else "medium"
+
+
+def _normalize_card_type(value: str) -> str:
+    normalized = (value or "disposition").strip().lower()
+    return normalized if normalized in {"biographical", "disposition", "trigger", "stylistic", "competence", "relational"} else "disposition"
 
 
 def _normalize_pillar_weights(weights: dict[str, float]) -> dict[str, float]:

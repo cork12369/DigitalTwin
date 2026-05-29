@@ -19,6 +19,7 @@ from app.scenario import (
     should_complete,
     trait_axis_for_choice,
 )
+from app.services.acp_council_service import council_configured, generate_acp_council_step
 from app.services.profile_service import build_model_profile_context
 
 
@@ -103,6 +104,28 @@ def generate_adaptive_step(
 
     settings = get_settings()
     question_number = adaptive_answer_count + 1
+    if council_configured(settings):
+        council_result = generate_acp_council_step(
+            participant=participant,
+            events=events,
+            current_state=current_state,
+            adaptive_answer_count=adaptive_answer_count,
+            settings=settings,
+        )
+        if council_result.next_step is None:
+            return AdaptiveGenerationResult(
+                hidden_state=_normalize_hidden_state(council_result.hidden_state, fallback=current_state),
+                next_step=None,
+                should_complete=False,
+                metadata=council_result.metadata,
+            )
+        return AdaptiveGenerationResult(
+            hidden_state=_normalize_hidden_state(council_result.hidden_state, fallback=current_state),
+            next_step=normalize_generated_step(council_result.next_step, question_number),
+            should_complete=False,
+            metadata=council_result.metadata,
+        )
+
     if settings.has_openrouter_key:
         model_result = _generate_with_openrouter(
             participant=participant,
